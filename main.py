@@ -19,7 +19,7 @@ log = logging.getLogger("main")
 # ============ Env ============
 load_dotenv()
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
-MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip() or os.getenv("MEM0_API_KEY", "").strip()
+MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()  # matches your working file
 
 # ============ FastAPI ============
 app = FastAPI()
@@ -42,9 +42,10 @@ async def webhook_sink(request: Request):
     return JSONResponse({"ok": True})
 
 # =====================================================
-# 🧠 MEM0 FUNCTIONS
+# 🧠 MEM0 FUNCTIONS (EXACTLY FROM YOUR WORKING VAPI FILE)
 # =====================================================
 async def mem0_search_v2(user_id: str, query: str):
+    """Mem0 v2 search; returns list or []"""
     if not MEMO_API_KEY:
         return []
     url = "https://api.mem0.ai/v2/memories/"
@@ -58,13 +59,16 @@ async def mem0_search_v2(user_id: str, query: str):
             if isinstance(data, list):
                 log.info(f"🧠 Found {len(data)} memories for {user_id}")
                 return data
+            else:
+                log.warning("Mem0 v2 returned non-list; ignoring.")
         else:
-            log.warning(f"⚠️ Mem0 search failed ({r.status_code}): {r.text}")
+            log.warning(f"⚠️ Mem0 v2 search failed ({r.status_code}): {r.text}")
     except Exception as e:
-        log.error(f"🔥 Mem0 search error: {e}")
+        log.error(f"🔥 Mem0 v2 search error: {e}")
     return []
 
 async def mem0_add_v1(user_id: str, text: str):
+    """Mem0 v1 add (messages schema)"""
     if not MEMO_API_KEY or not text:
         return
     url = "https://api.mem0.ai/v1/memories/"
@@ -78,67 +82,42 @@ async def mem0_add_v1(user_id: str, text: str):
         else:
             log.warning(f"⚠️ Mem0 add failed ({r.status_code}): {r.text}")
     except Exception as e:
-        log.error(f"🔥 Error adding memory: {e}")
+        log.error(f"🔥 Error adding memory to Mem0: {e}")
 
 def build_memory_context(items: list) -> str:
+    """Format retrieved memories into text for prompt injection"""
     if not items:
         return ""
     lines = []
     for it in items:
-        content = it.get("memory") or it.get("content") or it.get("text")
-        if content:
-            lines.append(f"- {content}")
-    return "Relevant memories (use only if helpful):\n" + "\n".join(lines) if lines else ""
+        if isinstance(it, dict):
+            content = it.get("memory") or it.get("content") or it.get("text")
+            if content:
+                lines.append(f"- {content}")
+    if not lines:
+        return ""
+    return "Relevant memories (use only if helpful):\n" + "\n".join(lines)
 
 # =====================================================
-# ⚡ STREAMING CEREBRAS CHAT
+# 🧠 CEREBRAS CHAT + RETELL CONNECTION (unchanged)
 # =====================================================
 CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
 
-async def cerebras_chat(messages: List[Dict[str, str]], on_chunk=None) -> str:
-    """Stream text tokens from Cerebras as they generate."""
+async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
     if not CEREBRAS_API_KEY:
         return "Cerebras key missing."
-
     headers = {"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"}
-    data = {"model": CEREBRAS_MODEL, "messages": messages, "stream": True}
-    full_text = ""
-
+    data = {"model": CEREBRAS_MODEL, "messages": messages}
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                "https://api.cerebras.ai/v1/chat/completions",
-                headers=headers,
-                json=data,
-            ) as response:
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    chunk = line[5:].strip()
-                    if chunk == "[DONE]":
-                        break
-                    try:
-                        payload = json.loads(chunk)
-                        delta = (
-                            payload.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content", "")
-                        )
-                        if delta:
-                            full_text += delta
-                            if on_chunk:
-                                await on_chunk(delta)
-                    except Exception:
-                        continue
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post("https://api.cerebras.ai/v1/chat/completions", headers=headers, json=data)
+            r.raise_for_status()
+            res = r.json()
+            return res["choices"][0]["message"]["content"]
     except Exception as e:
-        log.error(f"⚠️ Cerebras stream error: {e}")
+        log.error(f"LLM Error: {e}")
+        return "Sorry, something went wrong while generating a reply."
 
-    return full_text
-
-# =====================================================
-# 🔌 RETELL WEBSOCKET
-# =====================================================
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
     await websocket.accept()
@@ -154,6 +133,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             "end_turn": end_turn,
         }
         await websocket.send_text(json.dumps(payload))
+        log.info(f"🗣️ Sent speech response to Retell: {text[:100]}")
 
     await send_speech(0, "Hello. I'm ready. What can I do for you?")
 
@@ -169,7 +149,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             interaction_type = data.get("interaction_type")
             response_id = int(data.get("response_id", 1))
             user_message = ""
-
             if transcript and isinstance(transcript, list):
                 for t in reversed(transcript):
                     if t.get("role") == "user":
@@ -177,11 +156,11 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         break
 
             if interaction_type == "response_required":
-                mem_items = await mem0_search_v2(user_id, user_message)
+                mem_items = await mem0_search_v2(user_id, user_message or "")
                 context = build_memory_context(mem_items)
                 system_prompt = (
                     "You are Solomon Roth’s personal AI assistant.\n"
-                    "The following are true remembered facts about Solomon. "
+                    "The following are **true remembered facts** about Solomon. "
                     "Do not say you don't know them if they're listed below.\n"
                     f"{context}\n"
                 )
@@ -191,15 +170,8 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     {"role": "user", "content": user_message or "Hello?"},
                 ]
 
-                partial_reply = ""
-
-                async def on_chunk(delta: str):
-                    nonlocal partial_reply
-                    partial_reply += delta
-                    await send_speech(response_id, delta, end_turn=False)
-
-                reply = await cerebras_chat(messages, on_chunk=on_chunk)
-                await send_speech(response_id, "", end_turn=True)
+                reply = await cerebras_chat(messages)
+                await send_speech(response_id, reply)
 
                 if user_message:
                     asyncio.create_task(mem0_add_v1(user_id, user_message))

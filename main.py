@@ -215,12 +215,37 @@ async def get_prompt_live():
 
 @app.post("/update_prompt_live")
 async def update_prompt_live(request: Request):
-    """Update existing Notion block instead of appending new text."""
+    """Safely handle long pasted text by splitting into multiple Notion blocks."""
     try:
         body = await request.json()
-        new_text = body.get("prompt_text", "").strip()
-        if not new_text:
+        new_text = body.get("prompt_text", "")
+        if not new_text.strip():
             return {"success": False, "error": "Empty prompt_text"}
+
+        # 🧹 Clean up pasted text
+        clean_text = (
+            new_text.replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                    .replace("\u2028", "\n")
+                    .replace("\u2029", "\n")
+                    .replace("\xa0", " ")
+                    .replace("“", '"').replace("”", '"')
+                    .replace("’", "'").strip()
+        )
+
+        # ✂️ Split into smaller chunks (Notion API limit is ~2000 chars per block)
+        max_chunk = 1800
+        lines = clean_text.split("\n")
+        chunks = []
+        current = ""
+        for line in lines:
+            if len(current) + len(line) + 1 > max_chunk:
+                chunks.append(current.strip())
+                current = line
+            else:
+                current += ("\n" + line)
+        if current.strip():
+            chunks.append(current.strip())
 
         headers = {
             "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -228,36 +253,34 @@ async def update_prompt_live(request: Request):
             "Content-Type": "application/json"
         }
 
-        # 1️⃣ Get existing paragraph block
         url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Clear out old blocks first
             res = await client.get(url, headers=headers)
             res.raise_for_status()
             data = res.json()
-            results = data.get("results", [])
+            for block in data.get("results", []):
+                block_id = block.get("id")
+                if block_id:
+                    await client.delete(f"https://api.notion.com/v1/blocks/{block_id}", headers=headers)
 
-            if not results:
-                # If page empty → create new
-                payload = {
-                    "children": [{
-                        "object": "block",
-                        "type": "paragraph",
-                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": new_text}}]}
-                    }]
-                }
-                await client.patch(url, headers=headers, json=payload)
-            else:
-                # Update first paragraph
-                first_block_id = results[0]["id"]
-                update_url = f"https://api.notion.com/v1/blocks/{first_block_id}"
-                payload = {
+            # Add each chunk as a paragraph
+            children = []
+            for chunk in chunks:
+                children.append({
+                    "object": "block",
+                    "type": "paragraph",
                     "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": new_text}}]
+                        "rich_text": [{"type": "text", "text": {"content": chunk}}]
                     }
-                }
-                await client.patch(update_url, headers=headers, json=payload)
+                })
+            payload = {"children": children}
+            res = await client.patch(url, headers=headers, json=payload)
+            res.raise_for_status()
 
+        log.info(f"✅ Updated Notion prompt with {len(chunks)} blocks")
         return {"success": True}
+
     except Exception as e:
         log.error(f"❌ Error updating prompt in Notion: {e}")
         return {"success": False, "error": str(e)}

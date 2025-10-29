@@ -20,7 +20,7 @@ load_dotenv()
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
 MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
-NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "").strip()
+NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
 
 # ============ FastAPI ============
 app = FastAPI()
@@ -43,7 +43,7 @@ async def webhook_sink(request: Request):
     return JSONResponse({"ok": True})
 
 # =====================================================
-# 🧠 MEM0 FUNCTIONS (unchanged)
+# 🧠 MEM0 FUNCTIONS
 # =====================================================
 async def mem0_search_v2(user_id: str, query: str):
     if not MEMO_API_KEY:
@@ -97,7 +97,7 @@ def build_memory_context(items: list) -> str:
     return "Relevant memories (use only if helpful):\n" + "\n".join(lines)
 
 # =====================================================
-# ⚙️ CEREBRAS CHAT + RETELL CONNECTION (unchanged)
+# ⚙️ CEREBRAS CHAT
 # =====================================================
 CEREBRAS_MODEL = "llama3.1-8b"
 
@@ -117,7 +117,36 @@ async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
         return "Sorry, I hit a speed bump. Try again?"
 
 # =====================================================
-# 🔌 RETELL CONNECTION (unchanged)
+# 🧩 FETCH PROMPT LIVE FROM NOTION
+# =====================================================
+async def get_latest_prompt():
+    """Always fetch latest system prompt from Notion page before each chat."""
+    url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(url, headers=headers)
+            res.raise_for_status()
+            data = res.json()
+            text_parts = []
+            for block in data.get("results", []):
+                if block.get("type") == "paragraph":
+                    text = "".join(
+                        [r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])]
+                    )
+                    text_parts.append(text)
+            prompt_text = "\n".join(text_parts).strip()
+            return prompt_text or "You are Solomon Roth’s personal AI assistant."
+    except Exception as e:
+        log.error(f"❌ Error fetching prompt from Notion: {e}")
+        return "You are Solomon Roth’s personal AI assistant."
+
+# =====================================================
+# 🔌 RETELL CONNECTION
 # =====================================================
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
@@ -159,8 +188,11 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             if interaction_type == "response_required":
                 mem_items = await mem0_search_v2(user_id, user_message or "")
                 context = build_memory_context(mem_items)
+                # 🧠 Fetch the newest system prompt from Notion here
+                notion_prompt = await get_latest_prompt()
+
                 system_prompt = (
-                    "You are Solomon Roth’s personal AI assistant.\n"
+                    f"{notion_prompt}\n\n"
                     "The following are true remembered facts about Solomon. "
                     "Do not say you don't know them if they're listed below.\n"
                     f"{context}\n"
@@ -181,34 +213,9 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
 # =====================================================
 # 🧩 ADMIN PANEL — GET + UPDATE PROMPT FROM NOTION
 # =====================================================
-async def fetch_prompt_from_notion():
-    """Retrieve plain text from the Notion page."""
-    url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
-    headers = {
-        "Authorization": f"Bearer {NOTION_API_KEY}",
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json"
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(url, headers=headers)
-            res.raise_for_status()
-            data = res.json()
-            text_parts = []
-            for block in data.get("results", []):
-                if block.get("type") == "paragraph":
-                    text = "".join(
-                        [r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])]
-                    )
-                    text_parts.append(text)
-            return "\n".join(text_parts).strip()
-    except Exception as e:
-        log.error(f"❌ Error fetching prompt from Notion: {e}")
-        return "Error fetching prompt from Notion."
-
 @app.get("/get_prompt_live")
 async def get_prompt_live():
-    prompt = await fetch_prompt_from_notion()
+    prompt = await get_latest_prompt()
     return {"prompt_text": prompt}
 
 @app.post("/update_prompt_live")
@@ -220,15 +227,13 @@ async def update_prompt_live(request: Request):
         if not new_text:
             return {"success": False, "error": "Empty prompt_text"}
 
-        # Delete existing children (clear page)
-        delete_url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
+        url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
         headers = {
             "Authorization": f"Bearer {NOTION_API_KEY}",
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json"
         }
 
-        # Replace with new paragraph
         payload = {
             "children": [
                 {"object": "block", "type": "paragraph",
@@ -236,7 +241,7 @@ async def update_prompt_live(request: Request):
             ]
         }
         async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.patch(delete_url, headers=headers, json=payload)
+            res = await client.patch(url, headers=headers, json=payload)
             res.raise_for_status()
         return {"success": True}
     except Exception as e:

@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import uuid
 import asyncio
 from typing import List, Dict
 from dotenv import load_dotenv
@@ -96,18 +95,28 @@ def build_memory_context(items: list) -> str:
     return "Relevant memories (use only if helpful):\n" + "\n".join(lines)
 
 # =====================================================
-# 🧠 CEREBRAS CHAT + RETELL CONNECTION
+# ⚙️ CEREBRAS CHAT + RETELL CONNECTION
 # =====================================================
 CEREBRAS_MODEL = "llama3.1-8b"
 
 async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
     if not CEREBRAS_API_KEY:
         return "Cerebras key missing."
-    headers = {"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"}
-    data = {"model": CEREBRAS_MODEL, "messages": messages}
+
+    headers = {
+        "Authorization": f"Bearer {CEREBRAS_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": CEREBRAS_MODEL,
+        "messages": messages,
+        "max_tokens": 300,
+        "temperature": 0.7,
+    }
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post("https://api.cerebras.ai/v1/chat", headers=headers, json=data)
+            r = await client.post("https://api.cerebras.ai/v1/chat/completions", headers=headers, json=data)
             r.raise_for_status()
             res = r.json()
             return res["choices"][0]["message"]["content"]
@@ -115,6 +124,9 @@ async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
         log.error(f"LLM Error: {e}")
         return "Sorry, I hit a speed bump. Try again?"
 
+# =====================================================
+# 🔌 RETELL CONNECTION
+# =====================================================
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
     await websocket.accept()
@@ -179,7 +191,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         log.error(f"WebSocket error: {e}")
 
 # =====================================================
-# 🚀 SERVER
+# 🚀 SERVER STARTUP
 # =====================================================
 def start_ngrok(port: int = 8000) -> str:
     tunnel = ngrok.connect(addr=port, proto="http")
@@ -192,4 +204,5 @@ if __name__ == "__main__":
     start_ngrok(8000)
     log.info("🚀 Running FastAPI server...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 

@@ -43,7 +43,7 @@ async def webhook_sink(request: Request):
     return JSONResponse({"ok": True})
 
 # =====================================================
-# 🧠 MEM0 FUNCTIONS
+# 🧠 MEM0 FUNCTIONS (unchanged)
 # =====================================================
 async def mem0_search_v2(user_id: str, query: str):
     if not MEMO_API_KEY:
@@ -97,7 +97,7 @@ def build_memory_context(items: list) -> str:
     return "Relevant memories (use only if helpful):\n" + "\n".join(lines)
 
 # =====================================================
-# ⚙️ CEREBRAS CHAT + RETELL CONNECTION
+# ⚙️ CEREBRAS CHAT + RETELL CONNECTION (unchanged)
 # =====================================================
 CEREBRAS_MODEL = "llama3.1-8b"
 
@@ -117,7 +117,7 @@ async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
         return "Sorry, I hit a speed bump. Try again?"
 
 # =====================================================
-# 🔌 RETELL CONNECTION
+# 🔌 RETELL CONNECTION (unchanged)
 # =====================================================
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
@@ -179,7 +179,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         log.error(f"WebSocket error: {e}")
 
 # =====================================================
-# 🧩 ADMIN PANEL — FETCH LIVE PROMPT FROM NOTION
+# 🧩 ADMIN PANEL — GET + UPDATE PROMPT FROM NOTION
 # =====================================================
 async def fetch_prompt_from_notion():
     """Retrieve plain text from the Notion page."""
@@ -210,6 +210,38 @@ async def fetch_prompt_from_notion():
 async def get_prompt_live():
     prompt = await fetch_prompt_from_notion()
     return {"prompt_text": prompt}
+
+@app.post("/update_prompt_live")
+async def update_prompt_live(request: Request):
+    """Overwrite Notion page text with new prompt."""
+    try:
+        body = await request.json()
+        new_text = body.get("prompt_text", "").strip()
+        if not new_text:
+            return {"success": False, "error": "Empty prompt_text"}
+
+        # Delete existing children (clear page)
+        delete_url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
+        headers = {
+            "Authorization": f"Bearer {NOTION_API_KEY}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json"
+        }
+
+        # Replace with new paragraph
+        payload = {
+            "children": [
+                {"object": "block", "type": "paragraph",
+                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": new_text}}]}}
+            ]
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.patch(delete_url, headers=headers, json=payload)
+            res.raise_for_status()
+        return {"success": True}
+    except Exception as e:
+        log.error(f"❌ Error updating prompt in Notion: {e}")
+        return {"success": False, "error": str(e)}
 
 # =====================================================
 # 🚀 SERVER STARTUP

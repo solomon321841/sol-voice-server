@@ -59,8 +59,6 @@ async def mem0_search_v2(user_id: str, query: str):
             if isinstance(data, list):
                 log.info(f"🧠 Found {len(data)} memories for {user_id}")
                 return data
-            else:
-                log.warning("Mem0 v2 returned non-list; ignoring.")
         else:
             log.warning(f"⚠️ Mem0 v2 search failed ({r.status_code}): {r.text}")
     except Exception as e:
@@ -78,8 +76,6 @@ async def mem0_add_v1(user_id: str, text: str):
             r = await client.post(url, headers=headers, json=payload)
         if r.status_code == 200:
             log.info(f"✅ Memory added for {user_id}")
-        else:
-            log.warning(f"⚠️ Mem0 add failed ({r.status_code}): {r.text}")
     except Exception as e:
         log.error(f"🔥 Error adding memory to Mem0: {e}")
 
@@ -188,7 +184,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             if interaction_type == "response_required":
                 mem_items = await mem0_search_v2(user_id, user_message or "")
                 context = build_memory_context(mem_items)
-                # 🧠 Fetch the newest system prompt from Notion here
                 notion_prompt = await get_latest_prompt()
 
                 system_prompt = (
@@ -220,29 +215,48 @@ async def get_prompt_live():
 
 @app.post("/update_prompt_live")
 async def update_prompt_live(request: Request):
-    """Overwrite Notion page text with new prompt."""
+    """Update existing Notion block instead of appending new text."""
     try:
         body = await request.json()
         new_text = body.get("prompt_text", "").strip()
         if not new_text:
             return {"success": False, "error": "Empty prompt_text"}
 
-        url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
         headers = {
             "Authorization": f"Bearer {NOTION_API_KEY}",
             "Notion-Version": "2022-06-28",
             "Content-Type": "application/json"
         }
 
-        payload = {
-            "children": [
-                {"object": "block", "type": "paragraph",
-                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": new_text}}]}}
-            ]
-        }
+        # 1️⃣ Get existing paragraph block
+        url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
         async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.patch(url, headers=headers, json=payload)
+            res = await client.get(url, headers=headers)
             res.raise_for_status()
+            data = res.json()
+            results = data.get("results", [])
+
+            if not results:
+                # If page empty → create new
+                payload = {
+                    "children": [{
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {"rich_text": [{"type": "text", "text": {"content": new_text}}]}
+                    }]
+                }
+                await client.patch(url, headers=headers, json=payload)
+            else:
+                # Update first paragraph
+                first_block_id = results[0]["id"]
+                update_url = f"https://api.notion.com/v1/blocks/{first_block_id}"
+                payload = {
+                    "paragraph": {
+                        "rich_text": [{"type": "text", "text": {"content": new_text}}]
+                    }
+                }
+                await client.patch(update_url, headers=headers, json=payload)
+
         return {"success": True}
     except Exception as e:
         log.error(f"❌ Error updating prompt in Notion: {e}")

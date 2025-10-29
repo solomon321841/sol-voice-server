@@ -104,18 +104,8 @@ CEREBRAS_MODEL = "llama3.1-8b"
 async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
     if not CEREBRAS_API_KEY:
         return "Cerebras key missing."
-
-    headers = {
-        "Authorization": f"Bearer {CEREBRAS_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "model": CEREBRAS_MODEL,
-        "messages": messages,
-        "max_tokens": 300,
-        "temperature": 0.7,
-    }
-
+    headers = {"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"}
+    data = {"model": CEREBRAS_MODEL, "messages": messages, "max_tokens": 300, "temperature": 0.7}
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post("https://api.cerebras.ai/v1/chat/completions", headers=headers, json=data)
@@ -175,37 +165,51 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     "Do not say you don't know them if they're listed below.\n"
                     f"{context}\n"
                 )
-
                 messages = [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message or "Hello?"},
                 ]
-
                 reply = await cerebras_chat(messages)
                 await send_speech(response_id, reply)
-
                 if user_message:
                     asyncio.create_task(mem0_add_v1(user_id, user_message))
-
     except WebSocketDisconnect:
         log.info(f"❌ Retell WebSocket disconnected: {call_id}")
     except Exception as e:
         log.error(f"WebSocket error: {e}")
 
 # =====================================================
-# 🧩 TEST NOTION CONNECTION
+# 🧩 ADMIN PANEL — FETCH LIVE PROMPT FROM NOTION
 # =====================================================
-@app.get("/test-notion")
-async def test_notion():
+async def fetch_prompt_from_notion():
+    """Retrieve plain text from the Notion page."""
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": "2022-06-28",
         "Content-Type": "application/json"
     }
-    async with httpx.AsyncClient() as client:
-        res = await client.get(url, headers=headers)
-        return res.json()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(url, headers=headers)
+            res.raise_for_status()
+            data = res.json()
+            text_parts = []
+            for block in data.get("results", []):
+                if block.get("type") == "paragraph":
+                    text = "".join(
+                        [r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])]
+                    )
+                    text_parts.append(text)
+            return "\n".join(text_parts).strip()
+    except Exception as e:
+        log.error(f"❌ Error fetching prompt from Notion: {e}")
+        return "Error fetching prompt from Notion."
+
+@app.get("/get_prompt_live")
+async def get_prompt_live():
+    prompt = await fetch_prompt_from_notion()
+    return {"prompt_text": prompt}
 
 # =====================================================
 # 🚀 SERVER STARTUP

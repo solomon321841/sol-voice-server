@@ -19,6 +19,8 @@ log = logging.getLogger("main")
 load_dotenv()
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
 MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
+NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
+NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "").strip()
 
 # ============ FastAPI ============
 app = FastAPI()
@@ -191,6 +193,21 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         log.error(f"WebSocket error: {e}")
 
 # =====================================================
+# 🧩 TEST NOTION CONNECTION
+# =====================================================
+@app.get("/test-notion")
+async def test_notion():
+    url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
+    async with httpx.AsyncClient() as client:
+        res = await client.get(url, headers=headers)
+        return res.json()
+
+# =====================================================
 # 🚀 SERVER STARTUP
 # =====================================================
 def start_ngrok(port: int = 8000) -> str:
@@ -204,5 +221,4 @@ if __name__ == "__main__":
     start_ngrok(8000)
     log.info("🚀 Running FastAPI server...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
 

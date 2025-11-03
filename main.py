@@ -22,6 +22,9 @@ MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
 
+# ============ n8n Calendar Agent URL ============
+N8N_WEBHOOK_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
+
 # ============ FastAPI ============
 app = FastAPI()
 app.add_middleware(
@@ -142,6 +145,23 @@ async def get_latest_prompt():
         return "You are Solomon Roth’s personal AI assistant."
 
 # =====================================================
+# 🧩 N8N CALENDAR HELPER
+# =====================================================
+async def send_to_n8n(user_message: str) -> str:
+    """Send user message to n8n webhook and return plain text reply."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            payload = {"message": user_message}
+            response = await client.post(N8N_WEBHOOK_URL, json=payload)
+            if response.status_code == 200:
+                return response.text.strip()
+            else:
+                log.warning(f"⚠️ n8n returned {response.status_code}: {response.text}")
+    except Exception as e:
+        log.error(f"❌ Error sending to n8n: {e}")
+    return "Sorry, I couldn’t reach your calendar right now."
+
+# =====================================================
 # 🔌 RETELL CONNECTION
 # =====================================================
 @app.websocket("/ws/{call_id}")
@@ -161,7 +181,11 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         await websocket.send_text(json.dumps(payload))
         log.info(f"🗣️ Sent speech response: {text[:100]}")
 
-    await send_speech(0, "Hello. I'm ready. What can I do for you?")
+    await send_speech(0, "Hello Solomon, I’m ready. What can I do for you today?")
+
+    calendar_keywords = [
+        "schedule", "meeting", "calendar", "cancel", "book", "event", "appointment", "reschedule"
+    ]
 
     try:
         while True:
@@ -186,6 +210,14 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                 context = build_memory_context(mem_items)
                 notion_prompt = await get_latest_prompt()
 
+                # Detect if message is calendar related
+                if any(kw in user_message.lower() for kw in calendar_keywords):
+                    log.info(f"📅 Routing to n8n: {user_message}")
+                    reply = await send_to_n8n(user_message)
+                    await send_speech(response_id, reply)
+                    continue
+
+                # Otherwise use Cerebras
                 system_prompt = (
                     f"{notion_prompt}\n\n"
                     "The following are true remembered facts about Solomon. "
@@ -200,90 +232,11 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                 await send_speech(response_id, reply)
                 if user_message:
                     asyncio.create_task(mem0_add_v1(user_id, user_message))
+
     except WebSocketDisconnect:
         log.info(f"❌ Retell WebSocket disconnected: {call_id}")
     except Exception as e:
         log.error(f"WebSocket error: {e}")
-
-# =====================================================
-# 🧩 ADMIN PANEL — GET + UPDATE PROMPT FROM NOTION
-# =====================================================
-@app.get("/get_prompt_live")
-async def get_prompt_live():
-    prompt = await get_latest_prompt()
-    return {"prompt_text": prompt}
-
-@app.post("/update_prompt_live")
-async def update_prompt_live(request: Request):
-    """Safely handle long pasted text by splitting into multiple Notion blocks."""
-    try:
-        body = await request.json()
-        new_text = body.get("prompt_text", "")
-        if not new_text.strip():
-            return {"success": False, "error": "Empty prompt_text"}
-
-        # 🧹 Clean up pasted text
-        clean_text = (
-            new_text.replace("\r\n", "\n")
-                    .replace("\r", "\n")
-                    .replace("\u2028", "\n")
-                    .replace("\u2029", "\n")
-                    .replace("\xa0", " ")
-                    .replace("“", '"').replace("”", '"')
-                    .replace("’", "'").strip()
-        )
-
-        # ✂️ Split into smaller chunks (Notion API limit is ~2000 chars per block)
-        max_chunk = 1800
-        lines = clean_text.split("\n")
-        chunks = []
-        current = ""
-        for line in lines:
-            if len(current) + len(line) + 1 > max_chunk:
-                chunks.append(current.strip())
-                current = line
-            else:
-                current += ("\n" + line)
-        if current.strip():
-            chunks.append(current.strip())
-
-        headers = {
-            "Authorization": f"Bearer {NOTION_API_KEY}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
-        }
-
-        url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
-        async with httpx.AsyncClient(timeout=15) as client:
-            # Clear out old blocks first
-            res = await client.get(url, headers=headers)
-            res.raise_for_status()
-            data = res.json()
-            for block in data.get("results", []):
-                block_id = block.get("id")
-                if block_id:
-                    await client.delete(f"https://api.notion.com/v1/blocks/{block_id}", headers=headers)
-
-            # Add each chunk as a paragraph
-            children = []
-            for chunk in chunks:
-                children.append({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": chunk}}]
-                    }
-                })
-            payload = {"children": children}
-            res = await client.patch(url, headers=headers, json=payload)
-            res.raise_for_status()
-
-        log.info(f"✅ Updated Notion prompt with {len(chunks)} blocks")
-        return {"success": True}
-
-    except Exception as e:
-        log.error(f"❌ Error updating prompt in Notion: {e}")
-        return {"success": False, "error": str(e)}
 
 # =====================================================
 # 🚀 SERVER STARTUP

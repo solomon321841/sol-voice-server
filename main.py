@@ -214,6 +214,10 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                 if any(kw in user_message.lower() for kw in calendar_keywords):
                     log.info(f"📅 Routing to n8n: {user_message}")
                     reply = await send_to_n8n(user_message)
+                    # Avoid playing fallback responses
+                    if "assist you" in reply.lower() or "provide the action" in reply.lower():
+                        log.info("🤖 n8n fallback detected, skipping voice playback")
+                        continue
                     await send_speech(response_id, reply)
                     continue
 

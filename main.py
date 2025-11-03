@@ -153,6 +153,7 @@ async def send_to_n8n(user_message: str) -> str:
         async with httpx.AsyncClient(timeout=20) as client:
             payload = {"message": user_message}
             response = await client.post(N8N_WEBHOOK_URL, json=payload)
+            log.info(f"📩 n8n response: {response.text}")
             if response.status_code == 200:
                 return response.text.strip()
             else:
@@ -214,10 +215,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                 if any(kw in user_message.lower() for kw in calendar_keywords):
                     log.info(f"📅 Routing to n8n: {user_message}")
                     reply = await send_to_n8n(user_message)
-                    # Avoid playing fallback responses
-                    if "assist you" in reply.lower() or "provide the action" in reply.lower():
-                        log.info("🤖 n8n fallback detected, skipping voice playback")
-                        continue
+                    # Always speak the n8n reply
                     await send_speech(response_id, reply)
                     continue
 

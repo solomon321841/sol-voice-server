@@ -22,15 +22,16 @@ MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
 
-# New webhook URL for n8n
-N8N_WEBHOOK_URL = "https://n8n.marshall321.org/webhook/retell/create_web_call"
+# ============ n8n Calendar Agent URL ============
+N8N_WEBHOOK_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
 
 # ============ FastAPI ============
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"]
 )
 
 @app.get("/health")
@@ -46,7 +47,57 @@ async def webhook_sink(request: Request):
     return JSONResponse({"ok": True})
 
 # =====================================================
-# 🧠 MEM0 + CEREBRAS (same as before)
+# 🧠 MEM0 FUNCTIONS
+# =====================================================
+async def mem0_search_v2(user_id: str, query: str):
+    if not MEMO_API_KEY:
+        return []
+    url = "https://api.mem0.ai/v2/memories/"
+    headers = {"Authorization": f"Token {MEMO_API_KEY}"}
+    payload = {"filters": {"user_id": user_id}, "query": query}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, headers=headers, json=payload)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list):
+                log.info(f"🧠 Found {len(data)} memories for {user_id}")
+                return data
+        else:
+            log.warning(f"⚠️ Mem0 v2 search failed ({r.status_code}): {r.text}")
+    except Exception as e:
+        log.error(f"🔥 Mem0 v2 search error: {e}")
+    return []
+
+async def mem0_add_v1(user_id: str, text: str):
+    if not MEMO_API_KEY or not text:
+        return
+    url = "https://api.mem0.ai/v1/memories/"
+    headers = {"Authorization": f"Token {MEMO_API_KEY}"}
+    payload = {"user_id": user_id, "messages": [{"role": "user", "content": text}]}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, headers=headers, json=payload)
+        if r.status_code == 200:
+            log.info(f"✅ Memory added for {user_id}")
+    except Exception as e:
+        log.error(f"🔥 Error adding memory to Mem0: {e}")
+
+def build_memory_context(items: list) -> str:
+    if not items:
+        return ""
+    lines = []
+    for it in items:
+        if isinstance(it, dict):
+            content = it.get("memory") or it.get("content") or it.get("text")
+            if content:
+                lines.append(f"- {content}")
+    if not lines:
+        return ""
+    return "Relevant memories (use only if helpful):\n" + "\n".join(lines)
+
+# =====================================================
+# ⚙️ CEREBRAS CHAT
 # =====================================================
 CEREBRAS_MODEL = "llama3.1-8b"
 
@@ -95,6 +146,24 @@ async def get_latest_prompt():
         return "You are Solomon Roth’s personal AI assistant."
 
 # =====================================================
+# 🧩 N8N CALENDAR HELPER
+# =====================================================
+async def send_to_n8n(user_message: str) -> str:
+    """Send user message to n8n webhook and return plain text reply."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            payload = {"message": user_message}
+            response = await client.post(N8N_WEBHOOK_URL, json=payload)
+            log.info(f"📩 n8n response: {response.text}")
+            if response.status_code == 200:
+                return response.text.strip()
+            else:
+                log.warning(f"⚠️ n8n returned {response.status_code}: {response.text}")
+    except Exception as e:
+        log.error(f"❌ Error sending to n8n: {e}")
+    return "Sorry, I couldn’t reach your calendar right now."
+
+# =====================================================
 # 🔌 RETELL CONNECTION
 # =====================================================
 @app.websocket("/ws/{call_id}")
@@ -114,17 +183,24 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         await websocket.send_text(json.dumps(payload))
         log.info(f"🗣️ Sent speech response: {text[:100]}")
 
-    await send_speech(0, "Hello. I'm ready. What can I do for you?")
+    await send_speech(0, "Hello Solomon, I’m ready. What can I do for you today?")
+
+    calendar_keywords = [
+        "schedule", "meeting", "calendar", "cancel", "book", "event", "appointment", "reschedule"
+    ]
 
     try:
         while True:
             raw = await websocket.receive_text()
-            data = json.loads(raw)
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+
             transcript = data.get("transcript", [])
             interaction_type = data.get("interaction_type")
             response_id = int(data.get("response_id", 1))
             user_message = ""
-
             if transcript and isinstance(transcript, list):
                 for t in reversed(transcript):
                     if t.get("role") == "user":
@@ -132,75 +208,38 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         break
 
             if interaction_type == "response_required":
-                # 🧠 Send query to n8n for calendar check / logic
-                try:
-                    async with httpx.AsyncClient(timeout=20) as client:
-                        resp = await client.post(N8N_WEBHOOK_URL, json={"query": user_message})
-                        n8n_data = resp.json()
-                        log.info(f"📩 n8n responded: {n8n_data}")
-                        if isinstance(n8n_data, dict) and "calendar_summary" in n8n_data:
-                            reply = n8n_data["calendar_summary"]
-                        else:
-                            reply = "I couldn’t access your calendar right now."
-                except Exception as e:
-                    log.error(f"❌ n8n request failed: {e}")
-                    reply = "I had trouble contacting your scheduling system."
+                mem_items = await mem0_search_v2(user_id, user_message or "")
+                context = build_memory_context(mem_items)
+                notion_prompt = await get_latest_prompt()
 
-                # 🗣️ Only one voice reply — no double response
+                # Detect if message is calendar related
+                if any(kw in user_message.lower() for kw in calendar_keywords):
+                    log.info(f"📅 Routing to n8n: {user_message}")
+                    reply = await send_to_n8n(user_message)
+                    await send_speech(response_id, reply)
+                    # 🧩 Prevent Cerebras from double-talking
+                    continue
+
+                # Otherwise use Cerebras
+                system_prompt = (
+                    f"{notion_prompt}\n\n"
+                    "The following are true remembered facts about Solomon. "
+                    "Do not say you don't know them if they're listed below.\n"
+                    f"{context}\n"
+                )
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message or "Hello?"},
+                ]
+                reply = await cerebras_chat(messages)
                 await send_speech(response_id, reply)
+                if user_message:
+                    asyncio.create_task(mem0_add_v1(user_id, user_message))
 
     except WebSocketDisconnect:
         log.info(f"❌ Retell WebSocket disconnected: {call_id}")
     except Exception as e:
         log.error(f"WebSocket error: {e}")
-
-# =====================================================
-# 🧩 ADMIN PANEL — Notion prompt editor
-# =====================================================
-@app.get("/get_prompt_live")
-async def get_prompt_live():
-    prompt = await get_latest_prompt()
-    return {"prompt_text": prompt}
-
-@app.post("/update_prompt_live")
-async def update_prompt_live(request: Request):
-    try:
-        body = await request.json()
-        new_text = body.get("prompt_text", "").strip()
-        if not new_text:
-            return {"success": False, "error": "Empty prompt_text"}
-
-        headers = {
-            "Authorization": f"Bearer {NOTION_API_KEY}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
-        }
-
-        url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(url, headers=headers)
-            res.raise_for_status()
-            data = res.json()
-            for block in data.get("results", []):
-                block_id = block.get("id")
-                if block_id:
-                    await client.delete(f"https://api.notion.com/v1/blocks/{block_id}", headers=headers)
-
-            payload = {
-                "children": [{
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": new_text}}]
-                    }
-                }]
-            }
-            await client.patch(url, headers=headers, json=payload)
-
-        return {"success": True}
-    except Exception as e:
-        log.error(f"❌ Error updating prompt in Notion: {e}")
-        return {"success": False, "error": str(e)}
 
 # =====================================================
 # 🚀 SERVER STARTUP
@@ -209,7 +248,7 @@ def start_ngrok(port: int = 8000) -> str:
     tunnel = ngrok.connect(addr=port, proto="http")
     url = tunnel.public_url.replace("http://", "https://")
     log.info(f"🌐 Public URL: {url}")
-    log.info(f"🔗 Retell Custom LLM URL: wss://{url.replace('https://', '')}/ws/{{call_id}}")
+    log.info(f"🔗 Retell Custom LLM URL (paste this): wss://{url.replace('https://', '')}/ws/{{call_id}}")
     return url
 
 if __name__ == "__main__":

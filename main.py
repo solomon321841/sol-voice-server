@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from pyngrok import ngrok
+import time  # added for debounce timing
 
 # ============ Logging ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -236,6 +237,9 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         "put on my plate", "add to tasks", "add to my list"
     ]
 
+    # 🛑 Prevent duplicate Retell voice responses
+    last_message = {"text": None, "time": 0}
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -255,6 +259,15 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         break
 
             if interaction_type == "response_required":
+                now = time.time()
+                if (
+                    last_message["text"] == user_message
+                    and now - last_message["time"] < 2
+                ):
+                    log.info("🛑 Duplicate message ignored (preventing double voice).")
+                    continue
+                last_message = {"text": user_message, "time": now}
+
                 mem_items = await mem0_search_v2(user_id, user_message or "")
                 context = build_memory_context(mem_items)
                 notion_prompt = await get_latest_prompt()

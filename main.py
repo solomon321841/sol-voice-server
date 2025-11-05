@@ -170,28 +170,26 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     user_id = "solomon_roth"
 
     async def speak(response_id: int, text: str, end_turn=True):
-        payload = {
+        await websocket.send_text(json.dumps({
             "type": "response_message",
             "response_id": response_id,
             "content": text,
             "content_complete": True,
             "end_turn": end_turn,
-        }
-        await websocket.send_text(json.dumps(payload))
+        }))
         log.info(f"🗣️ {text[:100]}")
 
     await speak(0, "Hey Solomon, I’m ready when you are.")
 
-    quick_responses = [
-        "Got it.",
-        "Sure thing.",
-        "Okay, adding that now.",
-        "One sec, adding it.",
-        "Done, I’m on it.",
-    ]
+    quick_add = ["Got it.", "Okay, adding that now.", "On it.", "Sure thing.", "Done."]
+    quick_check = ["Checking that now.", "One sec, let me check.", "Okay, here’s what I found."]
+    quick_remove = ["Got it, removing that.", "Okay, it’s gone.", "Done, removed."]
+
     last_message = {"text": None, "time": 0}
-    plate_keywords = ["plate", "add", "task", "to-do", "notion", "what’s on my plate"]
-    calendar_keywords = ["schedule", "meeting", "calendar", "event", "appointment", "reschedule"]
+    plate_keywords = ["plate", "task", "to-do", "notion", "list"]
+    add_keywords = ["add", "put", "save"]
+    check_keywords = ["what", "show", "see", "check"]
+    remove_keywords = ["remove", "delete", "clear"]
 
     try:
         while True:
@@ -218,18 +216,27 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     continue
                 last_message = {"text": user_message, "time": now}
 
-                if any(k in user_message.lower() for k in plate_keywords):
-                    await speak(response_id, random.choice(quick_responses), end_turn=False)
-                    reply = await send_to_plate(user_message)
-                    await speak(response_id, reply)
-                    continue
+                lower = user_message.lower()
 
-                if any(k in user_message.lower() for k in calendar_keywords):
-                    await speak(response_id, random.choice(quick_responses), end_turn=False)
-                    reply = await send_to_plate(user_message)
-                    await speak(response_id, reply)
-                    continue
+                # 🧠 Intent detection
+                if any(k in lower for k in plate_keywords):
+                    if any(k in lower for k in add_keywords):
+                        await speak(response_id, random.choice(quick_add), end_turn=False)
+                        reply = await send_to_plate(user_message)
+                        await speak(response_id, reply)
+                        continue
+                    elif any(k in lower for k in check_keywords):
+                        await speak(response_id, random.choice(quick_check), end_turn=False)
+                        reply = await send_to_plate("check my plate")
+                        await speak(response_id, reply)
+                        continue
+                    elif any(k in lower for k in remove_keywords):
+                        await speak(response_id, random.choice(quick_remove), end_turn=False)
+                        reply = await send_to_plate(user_message)
+                        await speak(response_id, reply)
+                        continue
 
+                # Default conversation
                 notion_prompt = await get_latest_prompt()
                 mems = await mem0_search_v2(user_id, user_message)
                 context = build_memory_context(mems)

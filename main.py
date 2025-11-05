@@ -163,14 +163,23 @@ async def send_to_n8n_calendar(user_message: str) -> str:
     return "Sorry, I couldn’t reach your calendar right now."
 
 async def send_to_plate(user_message: str) -> str:
-    """Send user message to Notion Plate workflow and return plain reply."""
+    """Send user message to Notion Plate workflow and return clean reply."""
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             payload = {"message": user_message}
             response = await client.post(N8N_PLATE_URL, json=payload)
             log.info(f"🍽️ Plate response: {response.text}")
+
             if response.status_code == 200:
+                try:
+                    data = response.json()
+                    if isinstance(data, dict) and "reply" in data:
+                        return data["reply"].strip()
+                except Exception:
+                    pass
+                # fallback to plain text if not JSON
                 return response.text.strip()
+
             else:
                 log.warning(f"⚠️ Plate returned {response.status_code}: {response.text}")
     except Exception as e:
@@ -200,11 +209,14 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     await send_speech(0, "Hello Solomon, I’m ready. What can I do for you today?")
 
     calendar_keywords = [
-        "schedule", "meeting", "calendar", "cancel", "book", "event", "appointment", "reschedule"
+        "schedule", "meeting", "calendar", "cancel",
+        "event", "appointment", "reschedule"
     ]
 
     plate_keywords = [
-        "plate", "add", "task", "to-do", "notion", "on my plate", "remove from plate", "what’s on my plate"
+        "plate", "add", "task", "to-do", "notion", "on my plate",
+        "remove from plate", "what’s on my plate", "add to my plate",
+        "put on my plate", "add to tasks", "add to my list"
     ]
 
     try:
@@ -230,17 +242,17 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                 context = build_memory_context(mem_items)
                 notion_prompt = await get_latest_prompt()
 
+                # 🍽️ Plate (Notion) Routing FIRST
+                if any(kw in user_message.lower() for kw in plate_keywords):
+                    log.info(f"🍽️ Routing to plate workflow: {user_message}")
+                    reply = await send_to_plate(user_message)
+                    await send_speech(response_id, reply)
+                    continue
+
                 # 🗓️ Calendar Routing
                 if any(kw in user_message.lower() for kw in calendar_keywords):
                     log.info(f"📅 Routing to calendar workflow: {user_message}")
                     reply = await send_to_n8n_calendar(user_message)
-                    await send_speech(response_id, reply)
-                    continue
-
-                # 🍽️ Plate (Notion) Routing
-                if any(kw in user_message.lower() for kw in plate_keywords):
-                    log.info(f"🍽️ Routing to plate workflow: {user_message}")
-                    reply = await send_to_plate(user_message)
                     await send_speech(response_id, reply)
                     continue
 

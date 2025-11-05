@@ -162,6 +162,10 @@ async def send_to_n8n_calendar(user_message: str) -> str:
         log.error(f"❌ Error sending to n8n calendar: {e}")
     return "Sorry, I couldn’t reach your calendar right now."
 
+
+# =====================================================
+# 🧩 PLATE (NOTION) WORKFLOW — CLEAN REPLY FIX
+# =====================================================
 async def send_to_plate(user_message: str) -> str:
     """Send user message to Notion Plate workflow and return clean reply."""
     try:
@@ -173,18 +177,31 @@ async def send_to_plate(user_message: str) -> str:
             if response.status_code == 200:
                 try:
                     data = response.json()
-                    if isinstance(data, dict) and "reply" in data:
-                        return data["reply"].strip()
+                    # ✅ Extract only readable message fields
+                    if isinstance(data, dict):
+                        reply_text = (
+                            data.get("reply")
+                            or data.get("message")
+                            or data.get("text")
+                            or data.get("output")
+                        )
+                        if reply_text:
+                            return str(reply_text).strip()
+                        # Fallback if JSON keys differ
+                        return json.dumps(data, indent=2)
+                    elif isinstance(data, list):
+                        return " ".join(str(x) for x in data)
+                    else:
+                        return str(data).strip()
                 except Exception:
-                    pass
-                # fallback to plain text if not JSON
-                return response.text.strip()
-
+                    # fallback to plain text
+                    return response.text.strip()
             else:
                 log.warning(f"⚠️ Plate returned {response.status_code}: {response.text}")
     except Exception as e:
         log.error(f"❌ Error sending to plate workflow: {e}")
     return "Sorry, I couldn’t reach your plate right now."
+
 
 # =====================================================
 # 🔌 RETELL CONNECTION

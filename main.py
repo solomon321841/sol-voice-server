@@ -163,9 +163,8 @@ async def send_to_n8n_calendar(user_message: str) -> str:
         log.error(f"❌ Error sending to n8n calendar: {e}")
     return "Sorry, I couldn’t reach your calendar right now."
 
-
 # =====================================================
-# 🧩 PLATE (NOTION) WORKFLOW — CLEAN REPLY FIX
+# 🧩 PLATE (NOTION) WORKFLOW
 # =====================================================
 async def send_to_plate(user_message: str) -> str:
     """Send user message to Notion Plate workflow and return clean reply."""
@@ -178,7 +177,6 @@ async def send_to_plate(user_message: str) -> str:
             if response.status_code == 200:
                 try:
                     data = response.json()
-                    # ✅ Extract only readable message fields
                     if isinstance(data, dict):
                         reply_text = (
                             data.get("reply")
@@ -188,21 +186,18 @@ async def send_to_plate(user_message: str) -> str:
                         )
                         if reply_text:
                             return str(reply_text).strip()
-                        # Fallback if JSON keys differ
                         return json.dumps(data, indent=2)
                     elif isinstance(data, list):
                         return " ".join(str(x) for x in data)
                     else:
                         return str(data).strip()
                 except Exception:
-                    # fallback to plain text
                     return response.text.strip()
             else:
                 log.warning(f"⚠️ Plate returned {response.status_code}: {response.text}")
     except Exception as e:
         log.error(f"❌ Error sending to plate workflow: {e}")
     return "Sorry, I couldn’t reach your plate right now."
-
 
 # =====================================================
 # 🔌 RETELL CONNECTION
@@ -226,18 +221,13 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
 
     await send_speech(0, "Hello Solomon, I’m ready. What can I do for you today?")
 
-    calendar_keywords = [
-        "schedule", "meeting", "calendar", "cancel",
-        "event", "appointment", "reschedule"
-    ]
-
+    calendar_keywords = ["schedule", "meeting", "calendar", "cancel", "event", "appointment", "reschedule"]
     plate_keywords = [
         "plate", "add", "task", "to-do", "notion", "on my plate",
         "remove from plate", "what’s on my plate", "add to my plate",
         "put on my plate", "add to tasks", "add to my list"
     ]
 
-    # 🛑 Prevent duplicate Retell voice responses
     last_message = {"text": None, "time": 0}
 
     try:
@@ -259,34 +249,35 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         break
 
             if interaction_type == "response_required":
-                now = time.time()
-                if (
-                    last_message["text"] == user_message
-                    and now - last_message["time"] < 2
-                ):
-                    log.info("🛑 Duplicate message ignored (preventing double voice).")
-                    continue
-                last_message = {"text": user_message, "time": now}
+                # 🛑 Prevent duplicate or partial Retell responses
+                if user_message:
+                    now = time.time()
+                    same = user_message.strip().lower() == (last_message["text"] or "").strip().lower()
+                    subset = (
+                        user_message.strip().lower().startswith((last_message["text"] or "").strip().lower())
+                        or (last_message["text"] or "").strip().lower().startswith(user_message.strip().lower())
+                    )
+                    if (same or subset) and now - last_message["time"] < 3:
+                        log.info("🛑 Skipping duplicate/partial message to prevent double voice.")
+                        continue
+                    last_message = {"text": user_message, "time": now}
 
                 mem_items = await mem0_search_v2(user_id, user_message or "")
                 context = build_memory_context(mem_items)
                 notion_prompt = await get_latest_prompt()
 
-                # 🍽️ Plate (Notion) Routing FIRST
                 if any(kw in user_message.lower() for kw in plate_keywords):
                     log.info(f"🍽️ Routing to plate workflow: {user_message}")
                     reply = await send_to_plate(user_message)
                     await send_speech(response_id, reply)
                     continue
 
-                # 🗓️ Calendar Routing
                 if any(kw in user_message.lower() for kw in calendar_keywords):
                     log.info(f"📅 Routing to calendar workflow: {user_message}")
                     reply = await send_to_n8n_calendar(user_message)
                     await send_speech(response_id, reply)
                     continue
 
-                # 🤖 Otherwise use Cerebras
                 system_prompt = (
                     f"{notion_prompt}\n\n"
                     "The following are true remembered facts about Solomon. "

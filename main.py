@@ -3,13 +3,14 @@ import json
 import asyncio
 import httpx
 import logging
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # ==========================================
-# CONFIGURATION
+# 🔧 CONFIGURATION
 # ==========================================
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 N8N_CALENDAR_URL = os.getenv("N8N_CALENDAR_URL", "https://n8n.marshall321.org/webhook/agent/calendar")
 N8N_PLATE_URL = os.getenv("N8N_PLATE_URL", "https://n8n.marshall321.org/webhook/agent/plate")
@@ -22,10 +23,11 @@ app = FastAPI()
 
 
 # ==========================================
-# HELPERS
+# 🧠 HELPERS
 # ==========================================
+
 async def send_to_calendar(user_message: str) -> str:
-    """Send user message to the calendar workflow and return a clean reply."""
+    """Send user message to calendar workflow and return clean text."""
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             payload = {"message": user_message}
@@ -43,7 +45,8 @@ async def send_to_calendar(user_message: str) -> str:
                     pass
                 return response.text.strip()
 
-            log.warning(f"⚠️ Calendar returned {response.status_code}: {response.text}")
+            else:
+                log.warning(f"⚠️ Calendar returned {response.status_code}: {response.text}")
     except Exception as e:
         log.error(f"❌ Error sending to calendar workflow: {e}")
     return "Sorry, I couldn’t reach your calendar right now."
@@ -61,29 +64,32 @@ async def send_to_plate(user_message: str) -> str:
                 try:
                     data = response.json()
                     if isinstance(data, list):
-                        data = data[0]
+                        data = data[0]  # n8n wraps responses in arrays
                     if isinstance(data, dict) and "reply" in data:
                         return data["reply"].strip()
                 except Exception:
                     pass
+                # fallback plain text
                 return response.text.strip()
 
-            log.warning(f"⚠️ Plate returned {response.status_code}: {response.text}")
+            else:
+                log.warning(f"⚠️ Plate returned {response.status_code}: {response.text}")
     except Exception as e:
         log.error(f"❌ Error sending to plate workflow: {e}")
     return "Sorry, I couldn’t reach your plate right now."
 
 
 # ==========================================
-# ROUTING LOGIC
+# 🎯 MESSAGE ROUTING LOGIC
 # ==========================================
+
 calendar_keywords = [
     "schedule", "meeting", "calendar", "cancel",
     "event", "appointment", "reschedule"
 ]
 
 plate_keywords = [
-    "add", "plate", "task", "put", "create", "to-do", "todo", "note", "plan", "list"
+    "add", "plate", "task", "put", "create", "to-do", "todo", "note", "plan"
 ]
 
 
@@ -98,8 +104,9 @@ def route_message(user_message: str) -> str:
 
 
 # ==========================================
-# FASTAPI ENDPOINT
+# 🌐 MAIN API ENDPOINT
 # ==========================================
+
 class VoiceInput(BaseModel):
     message: str
 
@@ -110,11 +117,8 @@ async def handle_agent(request: Request):
     try:
         data = await request.json()
         user_message = data.get("message", "").strip()
-
         if not user_message:
-            return JSONResponse({
-                "reply": "It looks like your message didn't come through. How can I assist you today?"
-            })
+            return JSONResponse({"reply": "It looks like your message didn't come through. How can I assist you today?"})
 
         destination = route_message(user_message)
         log.info(f"🧭 Routed to: {destination}")
@@ -134,8 +138,56 @@ async def handle_agent(request: Request):
 
 
 # ==========================================
-# START SERVER
+# 🔌 WEBSOCKET ENDPOINT (For Retell)
 # ==========================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    log.info("🔌 WebSocket connected")
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            log.info(f"🗣️ WS received: {data}")
+
+            try:
+                payload = json.loads(data)
+                user_message = payload.get("message", "").strip()
+            except Exception:
+                user_message = data.strip()
+
+            if not user_message:
+                await websocket.send_text("It looks like your message didn't come through.")
+                continue
+
+            destination = route_message(user_message)
+            log.info(f"🧭 Routed (WS) to: {destination}")
+
+            if destination == "calendar":
+                reply = await send_to_calendar(user_message)
+            elif destination == "plate":
+                reply = await send_to_plate(user_message)
+            else:
+                reply = "I'm here — would you like to check your plate or your calendar?"
+
+            await websocket.send_text(reply)
+            log.info(f"📤 Sent WS reply: {reply}")
+
+    except WebSocketDisconnect:
+        log.info("🔌 WebSocket disconnected")
+    except Exception as e:
+        log.error(f"❌ WebSocket error: {e}")
+        try:
+            await websocket.send_text("There was an error processing your request.")
+        except Exception:
+            pass
+
+
+# ==========================================
+# 🏁 RUN SERVER
+# ==========================================
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8080))

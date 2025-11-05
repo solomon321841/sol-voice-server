@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from pyngrok import ngrok
-import time  # added for debounce timing
+import time
 
 # ============ Logging ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -202,8 +202,18 @@ async def send_to_plate(user_message: str) -> str:
 # =====================================================
 # 🔌 RETELL CONNECTION
 # =====================================================
+
+active_connections = set()
+
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
+    # --- Prevent multiple simultaneous connections for same call_id ---
+    if call_id in active_connections:
+        log.info(f"⚠️ Duplicate connection detected for {call_id}, closing old one.")
+        await websocket.close()
+        return
+    active_connections.add(call_id)
+
     await websocket.accept()
     log.info(f"🔌 Retell WebSocket connected: {call_id}")
     user_id = "solomon_roth"
@@ -249,7 +259,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         break
 
             if interaction_type == "response_required":
-                # 🛑 Prevent duplicate or partial Retell responses
                 if user_message:
                     now = time.time()
                     same = user_message.strip().lower() == (last_message["text"] or "").strip().lower()
@@ -295,6 +304,9 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
 
     except WebSocketDisconnect:
         log.info(f"❌ Retell WebSocket disconnected: {call_id}")
+    finally:
+        active_connections.discard(call_id)
+        log.info(f"🔕 Connection closed and removed: {call_id}")
     except Exception as e:
         log.error(f"WebSocket error: {e}")
 

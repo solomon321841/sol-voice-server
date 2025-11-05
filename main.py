@@ -50,19 +50,17 @@ async def webhook_sink(request: Request):
 async def mem0_search_v2(user_id: str, query: str):
     if not MEMO_API_KEY:
         return []
-    url = "https://api.mem0.ai/v2/memories/"
-    headers = {"Authorization": f"Token {MEMO_API_KEY}"}
-    payload = {"filters": {"user_id": user_id}, "query": query}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(url, headers=headers, json=payload)
+            r = await client.post(
+                "https://api.mem0.ai/v2/memories/",
+                headers={"Authorization": f"Token {MEMO_API_KEY}"},
+                json={"filters": {"user_id": user_id}, "query": query},
+            )
         if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                log.info(f"🧠 Found {len(data)} memories for {user_id}")
-                return data
+            return r.json()
     except Exception as e:
-        log.error(f"🔥 Mem0 v2 search error: {e}")
+        log.error(f"🔥 Mem0 v2 error: {e}")
     return []
 
 async def mem0_add_v1(user_id: str, text: str):
@@ -77,7 +75,7 @@ async def mem0_add_v1(user_id: str, text: str):
             )
         log.info(f"✅ Memory added for {user_id}")
     except Exception as e:
-        log.error(f"🔥 Error adding memory to Mem0: {e}")
+        log.error(f"🔥 Error adding memory: {e}")
 
 def build_memory_context(items: list) -> str:
     lines = [f"- {it.get('memory') or it.get('content') or it.get('text')}" for it in items if isinstance(it, dict)]
@@ -96,7 +94,6 @@ async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
                 headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
                 json={"model": CEREBRAS_MODEL, "messages": messages, "max_tokens": 300, "temperature": 0.7},
             )
-            r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
         log.error(f"LLM Error: {e}")
@@ -115,7 +112,6 @@ async def get_latest_prompt():
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(url, headers=headers)
-            r.raise_for_status()
             data = r.json()
             text_parts = [
                 "".join([r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])])
@@ -124,15 +120,14 @@ async def get_latest_prompt():
             ]
             return "\n".join(text_parts).strip() or "You are Solomon Roth’s personal AI assistant."
     except Exception as e:
-        log.error(f"❌ Error fetching prompt from Notion: {e}")
+        log.error(f"❌ Error fetching prompt: {e}")
         return "You are Solomon Roth’s personal AI assistant."
 
 # =====================================================
-# 🧩 N8N HELPERS
+# 🧩 N8N PLATE HANDLER
 # =====================================================
 async def send_to_plate(user_message: str) -> str:
     try:
-        # Normalize phrasing ("to my plate for X" → "for X to my plate")
         normalized = re.sub(r"(add .*?) to my plate for (.+)", r"add \1 for \2 to my plate", user_message, flags=re.I)
         user_message = normalized
         async with httpx.AsyncClient(timeout=20) as client:
@@ -141,7 +136,13 @@ async def send_to_plate(user_message: str) -> str:
                 try:
                     data = r.json()
                     if isinstance(data, dict):
-                        return str(data.get("reply") or data.get("message") or data.get("text") or data.get("output") or "").strip()
+                        return str(
+                            data.get("reply")
+                            or data.get("message")
+                            or data.get("text")
+                            or data.get("output")
+                            or "Task completed successfully."
+                        ).strip()
                     elif isinstance(data, list):
                         return " ".join(map(str, data))
                     else:
@@ -149,7 +150,7 @@ async def send_to_plate(user_message: str) -> str:
                 except Exception:
                     return r.text.strip()
     except Exception as e:
-        log.error(f"❌ Error sending to plate: {e}")
+        log.error(f"❌ Plate workflow error: {e}")
     return "Sorry, I couldn’t reach your plate right now."
 
 # =====================================================
@@ -160,7 +161,7 @@ active_connections = set()
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
     if call_id in active_connections:
-        log.info(f"⚠️ Duplicate connection for {call_id}, closing.")
+        log.info(f"⚠️ Duplicate connection detected for {call_id}, closing old one.")
         await websocket.close()
         return
     active_connections.add(call_id)
@@ -168,21 +169,26 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     log.info(f"🔌 Connected: {call_id}")
     user_id = "solomon_roth"
 
-    async def speak(response_id: int, text: str, end_turn: bool = True):
-        await websocket.send_text(json.dumps({
+    async def speak(response_id: int, text: str, end_turn=True):
+        payload = {
             "type": "response_message",
             "response_id": response_id,
             "content": text,
             "content_complete": True,
             "end_turn": end_turn,
-        }))
+        }
+        await websocket.send_text(json.dumps(payload))
         log.info(f"🗣️ {text[:100]}")
 
-    await speak(0, "Hey Solomon, I'm ready when you are.")
-    quick_responses = [
-        "Got it.", "Sure thing.", "Okay, adding that now.", "On it.", "Done, that’s on your plate."
-    ]
+    await speak(0, "Hey Solomon, I’m ready when you are.")
 
+    quick_responses = [
+        "Got it.",
+        "Sure thing.",
+        "Okay, adding that now.",
+        "One sec, adding it.",
+        "Done, I’m on it.",
+    ]
     last_message = {"text": None, "time": 0}
     plate_keywords = ["plate", "add", "task", "to-do", "notion", "what’s on my plate"]
     calendar_keywords = ["schedule", "meeting", "calendar", "event", "appointment", "reschedule"]
@@ -224,13 +230,14 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     await speak(response_id, reply)
                     continue
 
-                # Default chat
                 notion_prompt = await get_latest_prompt()
                 mems = await mem0_search_v2(user_id, user_message)
                 context = build_memory_context(mems)
                 system_prompt = f"{notion_prompt}\n\nKnown facts:\n{context}\n"
-                msg = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
-                reply = await cerebras_chat(msg)
+                reply = await cerebras_chat([
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message or "Hello?"},
+                ])
                 await speak(response_id, reply)
                 asyncio.create_task(mem0_add_v1(user_id, user_message))
 

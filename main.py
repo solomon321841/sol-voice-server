@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from pyngrok import ngrok
 import time
+import random
+import re
 
 # ============ Logging ============
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -149,26 +151,13 @@ async def get_latest_prompt():
 # =====================================================
 # 🧩 N8N HELPERS
 # =====================================================
-async def send_to_n8n_calendar(user_message: str) -> str:
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            payload = {"message": user_message}
-            response = await client.post(N8N_CALENDAR_URL, json=payload)
-            log.info(f"📩 n8n calendar response: {response.text}")
-            if response.status_code == 200:
-                return response.text.strip()
-            else:
-                log.warning(f"⚠️ n8n calendar returned {response.status_code}: {response.text}")
-    except Exception as e:
-        log.error(f"❌ Error sending to n8n calendar: {e}")
-    return "Sorry, I couldn’t reach your calendar right now."
-
-# =====================================================
-# 🧩 PLATE (NOTION) WORKFLOW
-# =====================================================
 async def send_to_plate(user_message: str) -> str:
     """Send user message to Notion Plate workflow and return clean reply."""
     try:
+        # Normalize phrasing dynamically ("to my plate for Friday" → "for Friday to my plate")
+        normalized = re.sub(r"(add .*?) to my plate for (.+)", r"add \1 for \2 to my plate", user_message, flags=re.I)
+        user_message = normalized
+
         async with httpx.AsyncClient(timeout=20) as client:
             payload = {"message": user_message}
             response = await client.post(N8N_PLATE_URL, json=payload)
@@ -207,9 +196,8 @@ active_connections = set()
 
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
-    # --- Prevent multiple simultaneous connections for same call_id ---
     if call_id in active_connections:
-        log.info(f"⚠️ Duplicate connection detected for {call_id}, closing old one.")
+        log.info(f"⚠️ Duplicate connection for {call_id}, closing old one.")
         await websocket.close()
         return
     active_connections.add(call_id)
@@ -229,7 +217,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         await websocket.send_text(json.dumps(payload))
         log.info(f"🗣️ Sent speech response: {text[:100]}")
 
-    await send_speech(0, "Hello Solomon, I’m ready. What can I do for you today?")
+    await send_speech(0, "Hey Solomon — I’m ready when you are.")
 
     calendar_keywords = ["schedule", "meeting", "calendar", "cancel", "event", "appointment", "reschedule"]
     plate_keywords = [
@@ -239,6 +227,13 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     ]
 
     last_message = {"text": None, "time": 0}
+    quick_confirmations = [
+        "Got it.",
+        "Sure thing, I’ll handle that.",
+        "Okay, adding that now.",
+        "On it.",
+        "Done, that’s on your plate.",
+    ]
 
     try:
         while True:
@@ -271,27 +266,28 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         continue
                     last_message = {"text": user_message, "time": now}
 
-                mem_items = await mem0_search_v2(user_id, user_message or "")
-                context = build_memory_context(mem_items)
-                notion_prompt = await get_latest_prompt()
-
+                # 🧠 Routing logic
                 if any(kw in user_message.lower() for kw in plate_keywords):
                     log.info(f"🍽️ Routing to plate workflow: {user_message}")
+                    await send_speech(response_id, random.choice(quick_confirmations), end_turn=False)
                     reply = await send_to_plate(user_message)
                     await send_speech(response_id, reply)
                     continue
 
                 if any(kw in user_message.lower() for kw in calendar_keywords):
                     log.info(f"📅 Routing to calendar workflow: {user_message}")
-                    reply = await send_to_n8n_calendar(user_message)
+                    await send_speech(response_id, random.choice(quick_confirmations), end_turn=False)
+                    reply = await send_to_plate(user_message)
                     await send_speech(response_id, reply)
                     continue
 
+                # Default: general chat
+                notion_prompt = await get_latest_prompt()
+                mem_items = await mem0_search_v2(user_id, user_message or "")
+                context = build_memory_context(mem_items)
                 system_prompt = (
                     f"{notion_prompt}\n\n"
-                    "The following are true remembered facts about Solomon. "
-                    "Do not say you don't know them if they're listed below.\n"
-                    f"{context}\n"
+                    f"The following are remembered facts about Solomon:\n{context}\n"
                 )
                 messages = [
                     {"role": "system", "content": system_prompt},
@@ -307,8 +303,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     finally:
         active_connections.discard(call_id)
         log.info(f"🔕 Connection closed and removed: {call_id}")
-    except Exception as e:
-        log.error(f"WebSocket error: {e}")
 
 # =====================================================
 # 🚀 SERVER STARTUP
@@ -317,7 +311,7 @@ def start_ngrok(port: int = 8000) -> str:
     tunnel = ngrok.connect(addr=port, proto="http")
     url = tunnel.public_url.replace("http://", "https://")
     log.info(f"🌐 Public URL: {url}")
-    log.info(f"🔗 Retell Custom LLM URL (paste this): wss://{url.replace('https://', '')}/ws/{{call_id}}")
+    log.info(f"🔗 Retell Custom LLM URL: wss://{url.replace('https://', '')}/ws/{{call_id}}")
     return url
 
 if __name__ == "__main__":

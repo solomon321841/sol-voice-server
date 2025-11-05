@@ -22,8 +22,9 @@ MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
 
-# ============ n8n Calendar Agent URL ============
-N8N_WEBHOOK_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
+# ============ n8n Webhooks ============
+N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
+N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
 # ============ FastAPI ============
 app = FastAPI()
@@ -120,7 +121,6 @@ async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
 # 🧩 FETCH PROMPT LIVE FROM NOTION
 # =====================================================
 async def get_latest_prompt():
-    """Always fetch latest system prompt from Notion page before each chat."""
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -146,22 +146,36 @@ async def get_latest_prompt():
         return "You are Solomon Roth’s personal AI assistant."
 
 # =====================================================
-# 🧩 N8N CALENDAR HELPER
+# 🧩 N8N HELPERS
 # =====================================================
-async def send_to_n8n(user_message: str) -> str:
-    """Send user message to n8n webhook and return plain text reply."""
+async def send_to_n8n_calendar(user_message: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             payload = {"message": user_message}
-            response = await client.post(N8N_WEBHOOK_URL, json=payload)
-            log.info(f"📩 n8n response: {response.text}")
+            response = await client.post(N8N_CALENDAR_URL, json=payload)
+            log.info(f"📩 n8n calendar response: {response.text}")
             if response.status_code == 200:
                 return response.text.strip()
             else:
-                log.warning(f"⚠️ n8n returned {response.status_code}: {response.text}")
+                log.warning(f"⚠️ n8n calendar returned {response.status_code}: {response.text}")
     except Exception as e:
-        log.error(f"❌ Error sending to n8n: {e}")
+        log.error(f"❌ Error sending to n8n calendar: {e}")
     return "Sorry, I couldn’t reach your calendar right now."
+
+async def send_to_plate(user_message: str) -> str:
+    """Send user message to Notion Plate workflow and return plain reply."""
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            payload = {"message": user_message}
+            response = await client.post(N8N_PLATE_URL, json=payload)
+            log.info(f"🍽️ Plate response: {response.text}")
+            if response.status_code == 200:
+                return response.text.strip()
+            else:
+                log.warning(f"⚠️ Plate returned {response.status_code}: {response.text}")
+    except Exception as e:
+        log.error(f"❌ Error sending to plate workflow: {e}")
+    return "Sorry, I couldn’t reach your plate right now."
 
 # =====================================================
 # 🔌 RETELL CONNECTION
@@ -189,6 +203,10 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         "schedule", "meeting", "calendar", "cancel", "book", "event", "appointment", "reschedule"
     ]
 
+    plate_keywords = [
+        "plate", "add", "task", "to-do", "notion", "on my plate", "remove from plate", "what’s on my plate"
+    ]
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -212,15 +230,21 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                 context = build_memory_context(mem_items)
                 notion_prompt = await get_latest_prompt()
 
-                # Detect if message is calendar related
+                # 🗓️ Calendar Routing
                 if any(kw in user_message.lower() for kw in calendar_keywords):
-                    log.info(f"📅 Routing to n8n: {user_message}")
-                    reply = await send_to_n8n(user_message)
+                    log.info(f"📅 Routing to calendar workflow: {user_message}")
+                    reply = await send_to_n8n_calendar(user_message)
                     await send_speech(response_id, reply)
-                    # 🧩 Prevent Cerebras from double-talking
                     continue
 
-                # Otherwise use Cerebras
+                # 🍽️ Plate (Notion) Routing
+                if any(kw in user_message.lower() for kw in plate_keywords):
+                    log.info(f"🍽️ Routing to plate workflow: {user_message}")
+                    reply = await send_to_plate(user_message)
+                    await send_speech(response_id, reply)
+                    continue
+
+                # 🤖 Otherwise use Cerebras
                 system_prompt = (
                     f"{notion_prompt}\n\n"
                     "The following are true remembered facts about Solomon. "

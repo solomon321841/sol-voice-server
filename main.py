@@ -82,10 +82,15 @@ def notion_headers():
         "Content-Type": "application/json",
     }
 
+# ==============================================================
+# 🔹 ADD TO NOTION
+# ==============================================================
+
 async def add_to_notion(title: str, day: str | None):
     week = infer_week(day)
     props = {
         "To-Do": {"title": [{"text": {"content": title}}]},
+        # dynamically handle Status or Select types
         "Plate": {"status": {"name": "Plate"}},
         "Type": {"status": {"name": "Task"}},
         "Week": {"select": {"name": week}},
@@ -108,9 +113,14 @@ async def add_to_notion(title: str, day: str | None):
         if 'r' in locals(): log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t add that to your plate."
 
+# ==============================================================
+# 🔹 READ FROM NOTION
+# ==============================================================
+
 async def read_from_notion(day: str | None):
     url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     query = {"filter": {"property": "Day", "select": {"equals": day}}} if day else {}
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(url, headers=notion_headers(), json=query)
@@ -143,7 +153,7 @@ async def read_from_notion(day: str | None):
         return " | ".join(parts)
 
 # ==============================================================
-# CEREBRAS CHAT
+# 🔹 CEREBRAS CHAT
 # ==============================================================
 
 async def cerebras_chat(prompt: str):
@@ -166,7 +176,7 @@ async def cerebras_chat(prompt: str):
         return "Sorry, I hit a small issue."
 
 # ==============================================================
-# RETELL WEBSOCKET
+# 🔹 RETELL WEBSOCKET
 # ==============================================================
 
 active_connections = set()
@@ -238,7 +248,7 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
         log.info(f"Closed: {call_id}")
 
 # ==============================================================
-# MAIN
+# MAIN ENTRY
 # ==============================================================
 
 if __name__ == "__main__":

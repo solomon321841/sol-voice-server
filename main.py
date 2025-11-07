@@ -1,5 +1,5 @@
 import os, json, logging, asyncio, time, random, re
-from typing import List, Dict, Any
+from typing import List, Dict
 from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -21,7 +21,7 @@ NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539")
 
 # ============ n8n Webhooks ============
 N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
-N8N_PLATE_URL    = "https://n8n.marshall321.org/webhook/agent/plate"
+N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
 # ============ FastAPI ============
 app = FastAPI()
@@ -45,7 +45,7 @@ async def webhook_sink(request: Request):
     return JSONResponse({"ok": True})
 
 # =====================================================
-# 🧠 MEM0 FUNCTIONS (UNCHANGED)
+# 🧠 MEM0 FUNCTIONS
 # =====================================================
 async def mem0_search_v2(user_id: str, query: str):
     if not MEMO_API_KEY:
@@ -82,7 +82,7 @@ def build_memory_context(items: list) -> str:
     return "Relevant memories:\n" + "\n".join(lines) if lines else ""
 
 # =====================================================
-# ⚙️ CEREBRAS CHAT (UNCHANGED)
+# ⚙️ CEREBRAS CHAT
 # =====================================================
 CEREBRAS_MODEL = "llama3.1-8b"
 
@@ -100,7 +100,7 @@ async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
         return "Sorry, I hit a speed bump. Try again?"
 
 # =====================================================
-# 🧩 FETCH PROMPT FROM NOTION (UNCHANGED)
+# 🧩 FETCH PROMPT FROM NOTION
 # =====================================================
 async def get_latest_prompt():
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
@@ -124,80 +124,10 @@ async def get_latest_prompt():
         return "You are Solomon Roth’s personal AI assistant."
 
 # =====================================================
-# 🧩 REPLY EXTRACTION (NEW UTILS) — SAFE ADD
-# =====================================================
-def _find_reply_recursive(obj: Any) -> str | None:
-    """Search any nested dict/list for a 'reply' string."""
-    try:
-        if isinstance(obj, dict):
-            if "reply" in obj and isinstance(obj["reply"], str):
-                return obj["reply"]
-            for v in obj.values():
-                found = _find_reply_recursive(v)
-                if found:
-                    return found
-        elif isinstance(obj, list):
-            for item in obj:
-                found = _find_reply_recursive(item)
-                if found:
-                    return found
-    except Exception:
-        pass
-    return None
-
-def _extract_n8n_reply(raw_text: str, parsed: Any) -> str:
-    """
-    Robustly extract a human string to speak from n8n responses that may be:
-      - dict: {"reply": "..."}
-      - list: [{"reply": "..."}]
-      - stringified JSON: "[{\"reply\": \"...\"}]"
-      - nested objects containing 'reply'
-    """
-    # 1) If parsed is list/dict, try direct/recursive extraction
-    if isinstance(parsed, list):
-        if parsed and isinstance(parsed[0], dict) and "reply" in parsed[0]:
-            val = parsed[0]["reply"]
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        # scan recursively for reply
-        found = _find_reply_recursive(parsed)
-        if isinstance(found, str) and found.strip():
-            return found.strip()
-        # fallback to a readable string
-        return json.dumps(parsed, ensure_ascii=False)
-
-    if isinstance(parsed, dict):
-        # direct key
-        val = parsed.get("reply") or parsed.get("message") or parsed.get("text") or parsed.get("output")
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-        # recursive search
-        found = _find_reply_recursive(parsed)
-        if isinstance(found, str) and found.strip():
-            return found.strip()
-        return json.dumps(parsed, ensure_ascii=False)
-
-    # 2) If parsed isn't dict/list, try to parse raw_text (stringified JSON)
-    if isinstance(raw_text, str):
-        try:
-            again = json.loads(raw_text)
-            return _extract_n8n_reply("", again)
-        except Exception:
-            # last resort: regex for "reply":"..."
-            m = re.search(r'"reply"\s*:\s*"([^"]+)"', raw_text)
-            if m and m.group(1).strip():
-                return m.group(1).strip()
-            return raw_text.strip()
-
-    # 3) Absolute fallback
-    return "Task completed successfully."
-
-# =====================================================
-# 🧩 N8N PLATE HANDLER (ONLY THIS CHANGED)
+# 🧩 N8N PLATE HANDLER (UPDATED)
 # =====================================================
 async def send_to_plate(user_message: str) -> str:
     try:
-        # keep your normalization trick
         normalized = re.sub(r"(add .*?) to my plate for (.+)", r"add \1 for \2 to my plate", user_message, flags=re.I)
         user_message = normalized
 
@@ -205,35 +135,39 @@ async def send_to_plate(user_message: str) -> str:
             r = await client.post(N8N_PLATE_URL, json={"message": user_message})
 
         raw_text = r.text
-        reply = "Sorry, I couldn’t reach your plate right now."
+        data = None
         try:
-            parsed = r.json()
+            data = r.json()
         except Exception:
-            parsed = None
+            pass
 
-        log.info(f"🔁 N8N HTTP {r.status_code}")
-        log.info(f"🔁 N8N RAW: {raw_text[:1000]}")  # up to 1k chars for safety
+        log.info(f"🔁 N8N {r.status_code} RAW: {raw_text[:500]}")
 
-        if r.status_code == 200:
-            reply = _extract_n8n_reply(raw_text, parsed)
-            # guard
-            if not isinstance(reply, str) or not reply.strip():
-                reply = "Task completed successfully."
-            return reply.strip()
+        if not data:
+            return "Sorry, I hit a small issue."
 
-        # Non-200: still try to extract a meaningful message
-        if parsed:
-            candidate = _extract_n8n_reply(raw_text, parsed)
-            if candidate and candidate.strip():
-                return candidate.strip()
-        return f"Plate request failed ({r.status_code})."
+        # ✅ Extract reply text safely
+        reply = None
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+            reply = data[0].get("reply")
+        elif isinstance(data, dict):
+            reply = data.get("reply")
+
+        if not reply:
+            reply = str(data)
+
+        # ✅ Clean markdown + line breaks
+        reply = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", reply)  # strip markdown links
+        reply = reply.replace("\\n", " ").replace("\n", " ").strip()
+
+        return reply or "Task completed successfully."
 
     except Exception as e:
         log.error(f"❌ Plate workflow error: {e}")
-        return "Sorry, I couldn’t reach your plate right now."
+        return "Sorry, I hit a small issue."
 
 # =====================================================
-# 🔌 RETELL CONNECTION (UNCHANGED)
+# 🔌 RETELL CONNECTION
 # =====================================================
 active_connections = set()
 
@@ -265,9 +199,9 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     quick_remove = ["Got it, removing that.", "Okay, it’s gone.", "Done, removed."]
 
     last_message = {"text": None, "time": 0}
-    plate_keywords  = ["plate", "task", "to-do", "notion", "list"]
-    add_keywords    = ["add", "put", "save", "book"]
-    check_keywords  = ["what", "show", "see", "check"]
+    plate_keywords = ["plate", "task", "to-do", "notion", "list"]
+    add_keywords = ["add", "put", "save", "book"]
+    check_keywords = ["what", "show", "see", "check"]
     remove_keywords = ["remove", "delete", "clear"]
 
     try:
@@ -297,7 +231,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
 
                 lower = user_message.lower()
 
-                # 🧠 Intent detection (UNCHANGED)
+                # 🧠 Intent detection
                 if any(k in lower for k in plate_keywords):
                     if any(k in lower for k in add_keywords):
                         await speak(response_id, random.choice(quick_add), end_turn=False)
@@ -315,7 +249,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         await speak(response_id, reply)
                         continue
 
-                # Default conversation (UNCHANGED)
+                # Default conversation
                 notion_prompt = await get_latest_prompt()
                 mems = await mem0_search_v2(user_id, user_message)
                 context = build_memory_context(mems)
@@ -334,7 +268,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         log.info(f"🔕 Connection closed: {call_id}")
 
 # =====================================================
-# 🚀 SERVER STARTUP (UNCHANGED)
+# 🚀 SERVER STARTUP
 # =====================================================
 def start_ngrok(port: int = 8000):
     url = ngrok.connect(addr=port, proto="http").public_url.replace("http://", "https://")

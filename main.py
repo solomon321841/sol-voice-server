@@ -1,228 +1,272 @@
-import os, json, logging, asyncio, httpx, re, datetime
+import os, json, logging, asyncio, time, random, re
+from typing import List, Dict
+from dotenv import load_dotenv
+import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 import uvicorn
+from pyngrok import ngrok
 
+# ============ Logging ============
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+log = logging.getLogger("main")
+
+# ============ Env ============
 load_dotenv()
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
+MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
+NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
+NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
+
+# ============ n8n Webhooks ============
+N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
+N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
+
+# ============ FastAPI ============
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("main")
-
-CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
-MEMO_API_KEY = os.getenv("MEMO_API_KEY", "")
-NOTION_TASKS_API_KEY = os.getenv("NOTION_TASKS_API_KEY", "")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
-NOTION_VERSION = "2022-06-28"
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-# ==============================================================
-# MEM0 MEMORY
-# ==============================================================
-
-async def mem0_add_v1(text: str):
+@app.post("/")
+async def webhook_sink(request: Request):
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            res = await client.post(
-                "https://api.mem0.ai/v1/add",
-                headers={"Authorization": f"Bearer {MEMO_API_KEY}"},
-                json={"text": text},
+        _ = await request.body()
+    except Exception:
+        pass
+    return JSONResponse({"ok": True})
+
+# =====================================================
+# 🧠 MEM0 FUNCTIONS
+# =====================================================
+async def mem0_search_v2(user_id: str, query: str):
+    if not MEMO_API_KEY:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                "https://api.mem0.ai/v2/memories/",
+                headers={"Authorization": f"Token {MEMO_API_KEY}"},
+                json={"filters": {"user_id": user_id}, "query": query},
             )
-            res.raise_for_status()
+        if r.status_code == 200:
+            return r.json()
     except Exception as e:
-        log.error(f"Mem0 Add Error: {e}")
+        log.error(f"🔥 Mem0 v2 error: {e}")
+    return []
 
-async def mem0_search_v2(query: str):
+async def mem0_add_v1(user_id: str, text: str):
+    if not MEMO_API_KEY or not text:
+        return
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            res = await client.post(
-                "https://api.mem0.ai/v2/search",
-                headers={"Authorization": f"Bearer {MEMO_API_KEY}"},
-                json={"query": query, "limit": 5},
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                "https://api.mem0.ai/v1/memories/",
+                headers={"Authorization": f"Token {MEMO_API_KEY}"},
+                json={"user_id": user_id, "messages": [{"role": "user", "content": text}]},
             )
-            res.raise_for_status()
-            data = res.json()
-            if "results" in data:
-                return "\n".join([r["text"] for r in data["results"]])
+        log.info(f"✅ Memory added for {user_id}")
     except Exception as e:
-        log.error(f"Mem0 Search Error: {e}")
-    return ""
+        log.error(f"🔥 Error adding memory: {e}")
 
-async def build_memory_context(user_text: str):
-    memory = await mem0_search_v2(user_text)
-    return f"Previously you said: {memory}" if memory else "Continue naturally."
+def build_memory_context(items: list) -> str:
+    lines = [f"- {it.get('memory') or it.get('content') or it.get('text')}" for it in items if isinstance(it, dict)]
+    return "Relevant memories:\n" + "\n".join(lines) if lines else ""
 
-# ==============================================================
-# HELPERS
-# ==============================================================
+# =====================================================
+# ⚙️ CEREBRAS CHAT
+# =====================================================
+CEREBRAS_MODEL = "llama3.1-8b"
 
-DAYS = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
-
-def find_day(text):
-    low = text.lower()
-    for d in DAYS:
-        if d in low: return d.capitalize()
-    if "today" in low:
-        return datetime.date.today().strftime("%A")
-    if "tomorrow" in low:
-        return (datetime.date.today() + datetime.timedelta(days=1)).strftime("%A")
-    return None
-
-def extract_title(text):
-    m = re.search(r"add\s+(.+?)\s+(?:to my plate|for\s+\w+)", text, re.I)
-    return m.group(1).strip() if m else text.strip()
-
-def notion_headers():
-    return {
-        "Authorization": f"Bearer {NOTION_TASKS_API_KEY}",
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json",
-    }
-
-# ==============================================================
-# NOTION HANDLERS
-# ==============================================================
-
-async def add_to_notion(title, day):
-    props = {
-        "To-Do": {"title": [{"text": {"content": title}}]},
-        "Plate": {"status": {"name": "Plate"}},
-    }
-    if day:
-        props["Day"] = {"select": {"name": day}}
-        props["Week"] = {"select": {"name": "This Week"}}
-    payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": props}
-    log.info(json.dumps(payload, indent=2))
-
+async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post("https://api.notion.com/v1/pages", headers=notion_headers(), json=payload)
-        log.info(f"Notion response: {r.status_code} - {r.text}")
-        if r.status_code in [200, 201]:
-            await mem0_add_v1(f"Added {title} for {day or 'unspecified'}")
-            return f"Added {title} to your plate{f' for {day}' if day else ''}."
-        else:
-            return f"Failed to add to Notion ({r.status_code})."
-    except Exception as e:
-        log.error(f"Add error: {e}")
-        return "Sorry, I hit a small issue."
-
-async def read_from_notion(day):
-    query = {"filter": {"property": "Day", "select": {"equals": day}}} if day else {}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query", headers=notion_headers(), json=query)
-        r.raise_for_status()
-        data = r.json()
-        items = [p["properties"]["To-Do"]["title"][0]["plain_text"] for p in data["results"] if "To-Do" in p["properties"]]
-        if not items:
-            return f"You have nothing on your plate for {day}."
-        return f"On your plate for {day}: {', '.join(items)}."
-    except Exception as e:
-        log.error(f"Read error: {e}")
-        return "Sorry, couldn’t read your plate."
-
-# ==============================================================
-# CEREBRAS CHAT
-# ==============================================================
-
-async def cerebras_chat(prompt):
-    headers = {"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"}
-    context = await build_memory_context(prompt)
-    data = {
-        "model": "llama3.1-8b",
-        "messages": [
-            {"role": "system", "content": "You are Solomon’s personal AI assistant."},
-            {"role": "system", "content": context},
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 250,
-        "temperature": 0.7,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post("https://api.cerebras.ai/v1/chat/completions", headers=headers, json=data)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+            r = await client.post(
+                "https://api.cerebras.ai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"},
+                json={"model": CEREBRAS_MODEL, "messages": messages, "max_tokens": 300, "temperature": 0.7},
+            )
+            return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
         log.error(f"LLM Error: {e}")
-        return "Sorry, I hit a small issue."
+        return "Sorry, I hit a speed bump. Try again?"
 
-# ==============================================================
-# RETELL SOCKET (with new user_text fix)
-# ==============================================================
+# =====================================================
+# 🧩 FETCH PROMPT FROM NOTION
+# =====================================================
+async def get_latest_prompt():
+    url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
+    headers = {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, headers=headers)
+            data = r.json()
+            text_parts = [
+                "".join([r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])])
+                for block in data.get("results", [])
+                if block.get("type") == "paragraph"
+            ]
+            return "\n".join(text_parts).strip() or "You are Solomon Roth’s personal AI assistant."
+    except Exception as e:
+        log.error(f"❌ Error fetching prompt: {e}")
+        return "You are Solomon Roth’s personal AI assistant."
 
+# =====================================================
+# 🧩 N8N PLATE HANDLER
+# =====================================================
+async def send_to_plate(user_message: str) -> str:
+    try:
+        normalized = re.sub(r"(add .*?) to my plate for (.+)", r"add \1 for \2 to my plate", user_message, flags=re.I)
+        user_message = normalized
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(N8N_PLATE_URL, json={"message": user_message})
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        return str(
+                            data.get("reply")
+                            or data.get("message")
+                            or data.get("text")
+                            or data.get("output")
+                            or "Task completed successfully."
+                        ).strip()
+                    elif isinstance(data, list):
+                        return " ".join(map(str, data))
+                    else:
+                        return str(data).strip()
+                except Exception:
+                    return r.text.strip()
+    except Exception as e:
+        log.error(f"❌ Plate workflow error: {e}")
+    return "Sorry, I couldn’t reach your plate right now."
+
+# =====================================================
+# 🔌 RETELL CONNECTION
+# =====================================================
 active_connections = set()
 
 @app.websocket("/ws/{call_id}")
-async def websocket_endpoint(ws: WebSocket, call_id: str):
+async def websocket_endpoint(websocket: WebSocket, call_id: str):
     if call_id in active_connections:
-        await ws.close()
+        log.info(f"⚠️ Duplicate connection detected for {call_id}, closing old one.")
+        await websocket.close()
         return
     active_connections.add(call_id)
-    await ws.accept()
-    log.info(f"Connected: {call_id}")
+    await websocket.accept()
+    log.info(f"🔌 Connected: {call_id}")
+    user_id = "solomon_roth"
 
-    async def speak(id_, text, end=True):
-        payload = {"type": "response_message", "response_id": id_, "content": text, "content_complete": True, "end_turn": end}
-        await ws.send_text(json.dumps(payload))
-        log.info(f"🗣️ {text}")
+    async def speak(response_id: int, text: str, end_turn=True):
+        await websocket.send_text(json.dumps({
+            "type": "response_message",
+            "response_id": response_id,
+            "content": text,
+            "content_complete": True,
+            "end_turn": end_turn,
+        }))
+        log.info(f"🗣️ {text[:100]}")
 
     await speak(0, "Hey Solomon, I’m ready when you are.")
 
+    quick_add = ["Got it.", "Okay, adding that now.", "On it.", "Sure thing.", "Done."]
+    quick_check = ["Checking that now.", "One sec, let me check.", "Okay, here’s what I found."]
+    quick_remove = ["Got it, removing that.", "Okay, it’s gone.", "Done, removed."]
+
+    last_message = {"text": None, "time": 0}
+    plate_keywords = ["plate", "task", "to-do", "notion", "list"]
+    add_keywords = ["add", "put", "save"]
+    check_keywords = ["what", "show", "see", "check"]
+    remove_keywords = ["remove", "delete", "clear"]
+
     try:
         while True:
-            msg = await ws.receive_text()
-            data = json.loads(msg)
+            data = json.loads(await websocket.receive_text())
             transcript = data.get("transcript", [])
+            interaction = data.get("interaction_type")
             response_id = int(data.get("response_id", 1))
+            user_message = ""
+            for t in reversed(transcript or []):
+                if t.get("role") == "user":
+                    user_message = t.get("content", "").strip()
+                    break
 
-            # ✅ FIX: always capture actual speech text
-            user_text = (
-                data.get("text")
-                or data.get("message", {}).get("content")
-                or next(
-                    (t.get("content") for t in reversed(transcript) if t.get("role") == "user"),
-                    ""
-                )
-            ).strip()
-
-            if not user_text:
-                continue
-
-            log.info(f"User said: {user_text}")
-            low = user_text.lower()
-
-            if "plate" in low:
-                if "add" in low or "book" in low:
-                    await speak(response_id, "Got it. Adding that now...", end=False)
-                    title, day = extract_title(user_text), find_day(user_text)
-                    asyncio.create_task(speak(response_id, await add_to_notion(title or "New Task", day)))
+            if interaction == "response_required":
+                now = time.time()
+                if (
+                    user_message
+                    and last_message["text"]
+                    and (user_message.lower().startswith(last_message["text"].lower())
+                         or last_message["text"].lower().startswith(user_message.lower()))
+                    and now - last_message["time"] < 3
+                ):
+                    log.info("🛑 Skipping duplicate/partial message.")
                     continue
-                if "what" in low:
-                    await speak(response_id, "Checking that now...", end=False)
-                    asyncio.create_task(speak(response_id, await read_from_notion(find_day(user_text))))
-                    continue
+                last_message = {"text": user_message, "time": now}
 
-            await speak(response_id, await cerebras_chat(user_text))
+                lower = user_message.lower()
+
+                # 🧠 Intent detection
+                if any(k in lower for k in plate_keywords):
+                    if any(k in lower for k in add_keywords):
+                        await speak(response_id, random.choice(quick_add), end_turn=False)
+                        reply = await send_to_plate(user_message)
+                        await speak(response_id, reply)
+                        continue
+                    elif any(k in lower for k in check_keywords):
+                        await speak(response_id, random.choice(quick_check), end_turn=False)
+                        reply = await send_to_plate("check my plate")
+                        await speak(response_id, reply)
+                        continue
+                    elif any(k in lower for k in remove_keywords):
+                        await speak(response_id, random.choice(quick_remove), end_turn=False)
+                        reply = await send_to_plate(user_message)
+                        await speak(response_id, reply)
+                        continue
+
+                # Default conversation
+                notion_prompt = await get_latest_prompt()
+                mems = await mem0_search_v2(user_id, user_message)
+                context = build_memory_context(mems)
+                system_prompt = f"{notion_prompt}\n\nKnown facts:\n{context}\n"
+                reply = await cerebras_chat([
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message or "Hello?"},
+                ])
+                await speak(response_id, reply)
+                asyncio.create_task(mem0_add_v1(user_id, user_message))
 
     except WebSocketDisconnect:
-        log.info(f"Disconnected: {call_id}")
+        log.info(f"❌ Disconnected: {call_id}")
     finally:
         active_connections.discard(call_id)
+        log.info(f"🔕 Connection closed: {call_id}")
+
+# =====================================================
+# 🚀 SERVER STARTUP
+# =====================================================
+def start_ngrok(port: int = 8000):
+    url = ngrok.connect(addr=port, proto="http").public_url.replace("http://", "https://")
+    log.info(f"🌐 {url}")
+    log.info(f"🔗 Retell URL: wss://{url.replace('https://', '')}/ws/{{call_id}}")
+    return url
 
 if __name__ == "__main__":
+    start_ngrok(8000)
+    log.info("🚀 Server running...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
 

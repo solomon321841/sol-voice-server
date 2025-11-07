@@ -157,7 +157,7 @@ async def send_to_plate(user_message: str) -> str:
     return "Sorry, couldn’t reach your plate."
 
 # =====================================================
-# 🔌 RETELL CONNECTION (Streaming GPT)
+# 🔌 RETELL CONNECTION (Hybrid GPT Streaming)
 # =====================================================
 
 active_connections = set()
@@ -235,6 +235,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     {"role": "user", "content": user_message},
                 ]
 
+                # Hybrid streaming with fallback
                 try:
                     stream = await openai_client.chat.completions.create(
                         model=GPT_MODEL,
@@ -243,18 +244,30 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         temperature=0.7,
                         stream=True,
                     )
-                    collected = ""
+                    full_reply = ""
                     async for chunk in stream:
                         delta = getattr(chunk.choices[0].delta, "content", None)
                         if delta:
-                            collected += delta
+                            full_reply += delta
                             await send_speech(response_id, delta, end_turn=False)
                     await send_speech(response_id, "", end_turn=True)
                     if user_message:
                         asyncio.create_task(mem0_add_v1(user_id, user_message))
                 except Exception as e:
-                    log.error(f"❌ Streaming error: {e}")
-                    await send_speech(response_id, "Sorry, I hit a small issue.")
+                    log.error(f"⚠️ Stream failed, using fallback: {e}")
+                    try:
+                        comp = await openai_client.chat.completions.create(
+                            model=GPT_MODEL,
+                            messages=messages,
+                            max_tokens=150,
+                            temperature=0.7,
+                        )
+                        reply = comp.choices[0].message.content
+                        await send_speech(response_id, reply)
+                    except Exception as e2:
+                        log.error(f"❌ GPT fallback error: {e2}")
+                        await send_speech(response_id, "Sorry, I ran into a connection hiccup.")
+
     except WebSocketDisconnect:
         log.info(f"❌ Disconnected: {call_id}")
     finally:

@@ -20,7 +20,6 @@ log = logging.getLogger("main")
 # ============ Env ============
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
 MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
@@ -215,12 +214,10 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     continue
                 last_message = {"text": user_message, "time": now}
 
-                # Fetch memory and prompt
                 mem_items = await mem0_search_v2(user_id, user_message)
                 context = build_memory_context(mem_items)
                 notion_prompt = await get_latest_prompt()
 
-                # Route to workflows
                 if any(k in user_message.lower() for k in plate_keywords):
                     await send_speech(response_id, "Got it, adding that now...", end_turn=False)
                     reply = await send_to_plate(user_message)
@@ -232,7 +229,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     await send_speech(response_id, reply)
                     continue
 
-                # GPT streaming
                 system_prompt = f"{notion_prompt}\n\nFacts:\n{context}"
                 messages = [
                     {"role": "system", "content": system_prompt},
@@ -249,7 +245,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     )
                     collected = ""
                     async for chunk in stream:
-                        delta = chunk.choices[0].delta.get("content", "")
+                        delta = getattr(chunk.choices[0].delta, "content", None)
                         if delta:
                             collected += delta
                             await send_speech(response_id, delta, end_turn=False)

@@ -101,7 +101,7 @@ def build_memory_context(items: list) -> str:
     return "Relevant memories:\n" + "\n".join(lines) if lines else ""
 
 # =====================================================
-# 🧩 FETCH PROMPT LIVE FROM NOTION
+# 🧩 FETCH PROMPT LIVE FROM NOTION (Custom Greeting)
 # =====================================================
 async def get_latest_prompt():
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
@@ -157,17 +157,23 @@ async def send_to_plate(user_message: str) -> str:
     return "Sorry, couldn’t reach your plate."
 
 # =====================================================
-# 🔌 RETELL CONNECTION (Hybrid GPT Streaming)
+# 🔌 RETELL CONNECTION (Single-Session + Greeting)
 # =====================================================
 
-active_connections = set()
+active_connections: Dict[str, WebSocket] = {}
 
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
-    if call_id in active_connections:
-        await websocket.close()
-        return
-    active_connections.add(call_id)
+    # ✅ Force close any existing session for this call_id
+    old_ws = active_connections.get(call_id)
+    if old_ws:
+        try:
+            await old_ws.close()
+            log.info(f"⚠️ Closed old session for {call_id}")
+        except Exception:
+            pass
+    active_connections[call_id] = websocket
+
     await websocket.accept()
     log.info(f"🔌 Retell WebSocket connected: {call_id}")
     user_id = "solomon_roth"
@@ -180,10 +186,17 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             "content_complete": end_turn,
             "end_turn": end_turn,
         }
-        await websocket.send_text(json.dumps(payload))
-        log.info(f"🗣️ Sent: {text[:80]}")
+        try:
+            await websocket.send_text(json.dumps(payload))
+            log.info(f"🗣️ Sent: {text[:80]}")
+        except Exception as e:
+            log.error(f"WebSocket send error: {e}")
 
-    await send_speech(0, "Hello Solomon, I'm ready whenever you are.")
+    # --- Custom greeting from Notion ---
+    prompt_text = await get_latest_prompt()
+    first_line = prompt_text.splitlines()[0] if prompt_text else ""
+    greeting = first_line if first_line else "Hello Solomon, I'm ready whenever you are."
+    await send_speech(0, greeting)
 
     calendar_keywords = ["schedule", "meeting", "calendar", "cancel", "appointment"]
     plate_keywords = ["plate", "add", "task", "to-do", "notion", "what’s on my plate"]
@@ -244,17 +257,15 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         temperature=0.7,
                         stream=True,
                     )
-                    full_reply = ""
                     async for chunk in stream:
                         delta = getattr(chunk.choices[0].delta, "content", None)
                         if delta:
-                            full_reply += delta
                             await send_speech(response_id, delta, end_turn=False)
                     await send_speech(response_id, "", end_turn=True)
                     if user_message:
                         asyncio.create_task(mem0_add_v1(user_id, user_message))
                 except Exception as e:
-                    log.error(f"⚠️ Stream failed, using fallback: {e}")
+                    log.error(f"⚠️ Stream failed, fallback: {e}")
                     try:
                         comp = await openai_client.chat.completions.create(
                             model=GPT_MODEL,
@@ -266,13 +277,17 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         await send_speech(response_id, reply)
                     except Exception as e2:
                         log.error(f"❌ GPT fallback error: {e2}")
-                        await send_speech(response_id, "Sorry, I ran into a connection hiccup.")
+                        await send_speech(response_id, "Sorry, I ran into a small hiccup.")
 
     except WebSocketDisconnect:
         log.info(f"❌ Disconnected: {call_id}")
     finally:
-        active_connections.discard(call_id)
-        log.info(f"🔕 Closed: {call_id}")
+        try:
+            if call_id in active_connections:
+                del active_connections[call_id]
+                log.info(f"🔕 Closed session for {call_id}")
+        except Exception as e:
+            log.error(f"Cleanup error: {e}")
 
 # =====================================================
 # 🚀 SERVER STARTUP

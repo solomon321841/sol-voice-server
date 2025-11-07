@@ -105,6 +105,8 @@ async def add_to_notion(title: str, day: str | None):
         return f"Added “{title}” to your plate{f' for {day}' if day else ''}."
     except Exception as e:
         log.error(f"❌ Notion add error: {e}")
+        if 'r' in locals():
+            log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t add that to your plate."
 
 async def read_from_notion(day: str | None):
@@ -117,12 +119,15 @@ async def read_from_notion(day: str | None):
             data = r.json()
     except Exception as e:
         log.error(f"❌ Notion read error: {e}")
+        if 'r' in locals():
+            log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t read your plate right now."
 
     items = []
     for page in data.get("results", []):
         props = page.get("properties", {})
-        title = "".join(t.get("plain_text", "") for t in props.get("To-Do", {}).get("title", []))
+        # use Name because some DBs call it that instead of To-Do
+        title = "".join(t.get("plain_text", "") for t in props.get("Name", {}).get("title", []))
         day_val = props.get("Day", {}).get("select", {}).get("name", "")
         if title:
             items.append((title, day_val))
@@ -160,6 +165,8 @@ async def cerebras_chat(prompt: str):
             return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
         log.error(f"LLM Error: {e}")
+        if 'r' in locals():
+            log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I hit a small issue."
 
 # ==============================================================
@@ -210,7 +217,6 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
                     await speak(response_id, "Got it. Adding that now...", end_turn=False)
                     title = extract_title(user_text)
                     day = find_day(user_text)
-                    # Fire the Notion add asynchronously
                     async def add_task():
                         msg = await add_to_notion(title or "New Task", day)
                         await speak(response_id, msg)

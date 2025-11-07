@@ -29,7 +29,7 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
 NOTION_VERSION = "2022-06-28"
 
 # ==============================================================
-# HEALTHCHECK + BASIC ROUTES
+# HEALTHCHECK
 # ==============================================================
 
 @app.get("/health")
@@ -68,7 +68,6 @@ def infer_week(day: str | None):
     return "This Week" if (target_date - today).days < 7 else "Next Week"
 
 def extract_title(text: str):
-    # Normalize phrases like “add book a flight to my plate for friday”
     normalized = re.sub(r"(add\s+.+?)\s+to my plate\s+for\s+([a-zA-Z]+)",
                         r"\1 for \2 to my plate", text, flags=re.I)
     m = re.search(r"add\s+(.+?)\s+(?:for\s+[a-zA-Z]+|to my plate)", normalized, flags=re.I)
@@ -95,12 +94,14 @@ async def add_to_notion(title: str, day: str | None):
         props["Day"] = {"select": {"name": day}}
 
     payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": props}
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post("https://api.notion.com/v1/pages",
                                   headers=notion_headers(),
                                   json=payload)
             r.raise_for_status()
+        log.info(f"✅ Added to Notion: {title}")
         return f"Added “{title}” to your plate{f' for {day}' if day else ''}."
     except Exception as e:
         log.error(f"❌ Notion add error: {e}")
@@ -133,16 +134,14 @@ async def read_from_notion(day: str | None):
         listing = ", ".join(t for t, _ in items)
         return f"Here’s what’s on your plate for {day}: {listing}."
     else:
-        parts = []
         grouped = {}
         for t, d in items:
             grouped.setdefault(d or "Unscheduled", []).append(t)
-        for d, arr in grouped.items():
-            parts.append(f"{d}: " + ", ".join(arr))
+        parts = [f"{d}: " + ", ".join(arr) for d, arr in grouped.items()]
         return " | ".join(parts)
 
 # ==============================================================
-# CEREBRAS CHAT HELPER
+# CEREBRAS CHAT
 # ==============================================================
 
 async def cerebras_chat(prompt: str):
@@ -191,7 +190,6 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
             raw = await ws.receive_text()
             data = json.loads(raw)
             transcript = data.get("transcript", [])
-            interaction_type = data.get("interaction_type")
             response_id = int(data.get("response_id", 1))
 
             user_text = ""
@@ -212,14 +210,21 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
                     await speak(response_id, "Got it. Adding that now...", end_turn=False)
                     title = extract_title(user_text)
                     day = find_day(user_text)
-                    reply = await add_to_notion(title or "New Task", day)
-                    await speak(response_id, reply)
+                    # Fire the Notion add asynchronously
+                    async def add_task():
+                        msg = await add_to_notion(title or "New Task", day)
+                        await speak(response_id, msg)
+                    asyncio.create_task(add_task())
+                    continue
+
                 elif "what" in low:
                     await speak(response_id, "Checking that now...", end_turn=False)
-                    day = find_day(user_text)
-                    reply = await read_from_notion(day)
-                    await speak(response_id, reply)
-                continue
+                    async def read_task():
+                        day_ = find_day(user_text)
+                        msg = await read_from_notion(day_)
+                        await speak(response_id, msg)
+                    asyncio.create_task(read_task())
+                    continue
 
             reply = await cerebras_chat(user_text)
             await speak(response_id, reply)

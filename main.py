@@ -244,6 +244,8 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             if not user_text:
                 continue
 
+            log.info(f"Incoming text: {user_text} (interaction_type={interaction_type})")
+
             now = time.time()
             if user_text.lower() == last_msg["text"].lower() and (now - last_msg["time"]) < 3:
                 continue
@@ -254,8 +256,8 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
 
             low = user_text.lower()
 
-            # Plate handling
-            if any(w in low for w in plate_words):
+            # ✅ Broadened trigger
+            if any(w in low for w in plate_words) or "what's on my plate" in low or "add" in low or "book" in low:
                 normalized = re.sub(r"(add\s+.+?)\s+to my plate\s+for\s+([a-zA-Z]+)", r"\1 for \2 to my plate", user_text, flags=re.I)
                 day = find_day_in_text(normalized)
                 is_add = any(w in low for w in add_words)
@@ -274,7 +276,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     await speak(response_id, final)
                     continue
 
-            # General chat
+            # Fallback to LLM
             prompt = await get_prompt_from_notion()
             reply = await cerebras_chat([
                 {"role": "system", "content": prompt},

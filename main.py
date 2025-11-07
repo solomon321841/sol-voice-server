@@ -124,7 +124,7 @@ async def get_latest_prompt():
         return "You are Solomon Roth’s personal AI assistant."
 
 # =====================================================
-# 🧩 N8N PLATE HANDLER
+# 🧩 N8N PLATE HANDLER (✅ FIXED)
 # =====================================================
 async def send_to_plate(user_message: str) -> str:
     try:
@@ -135,7 +135,13 @@ async def send_to_plate(user_message: str) -> str:
             if r.status_code == 200:
                 try:
                     data = r.json()
-                    if isinstance(data, dict):
+                    # ✅ FIX: handle list response from n8n
+                    if isinstance(data, list) and len(data) > 0:
+                        first = data[0]
+                        if isinstance(first, dict) and "reply" in first:
+                            return first["reply"].strip()
+                        return str(first).strip()
+                    elif isinstance(data, dict):
                         return str(
                             data.get("reply")
                             or data.get("message")
@@ -143,8 +149,6 @@ async def send_to_plate(user_message: str) -> str:
                             or data.get("output")
                             or "Task completed successfully."
                         ).strip()
-                    elif isinstance(data, list):
-                        return " ".join(map(str, data))
                     else:
                         return str(data).strip()
                 except Exception:
@@ -267,6 +271,4 @@ if __name__ == "__main__":
     start_ngrok(8000)
     log.info("🚀 Server running...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
 

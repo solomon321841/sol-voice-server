@@ -1,9 +1,9 @@
-import os, json, logging, asyncio, httpx, re, time, datetime
+import os, json, logging, asyncio, httpx, re, datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 from dotenv import load_dotenv
+import uvicorn
 
 # ==============================================================
 # CONFIGURATION
@@ -29,7 +29,7 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
 NOTION_VERSION = "2022-06-28"
 
 # ==============================================================
-# HEALTHCHECK
+# BASIC ENDPOINTS
 # ==============================================================
 
 @app.get("/health")
@@ -42,7 +42,7 @@ async def index(request: Request):
     return JSONResponse({"ok": True})
 
 # ==============================================================
-# NOTION HELPERS
+# HELPERS
 # ==============================================================
 
 DAYS = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
@@ -85,9 +85,9 @@ def notion_headers():
 async def add_to_notion(title: str, day: str | None):
     week = infer_week(day)
     props = {
-        "Name": {"title": [{"text": {"content": title}}]},
+        "To-Do": {"title": [{"text": {"content": title}}]},
         "Plate": {"status": {"name": "Plate"}},
-        "Type": {"status": {"name": "Review"}},
+        "Type": {"status": {"name": "Task"}},
         "Week": {"select": {"name": week}},
     }
     if day:
@@ -105,8 +105,7 @@ async def add_to_notion(title: str, day: str | None):
         return f"Added “{title}” to your plate{f' for {day}' if day else ''}."
     except Exception as e:
         log.error(f"❌ Notion add error: {e}")
-        if 'r' in locals():
-            log.error(f"RESPONSE TEXT: {r.text}")
+        if 'r' in locals(): log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t add that to your plate."
 
 async def read_from_notion(day: str | None):
@@ -119,15 +118,13 @@ async def read_from_notion(day: str | None):
             data = r.json()
     except Exception as e:
         log.error(f"❌ Notion read error: {e}")
-        if 'r' in locals():
-            log.error(f"RESPONSE TEXT: {r.text}")
+        if 'r' in locals(): log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t read your plate right now."
 
     items = []
     for page in data.get("results", []):
         props = page.get("properties", {})
-        # use Name because some DBs call it that instead of To-Do
-        title = "".join(t.get("plain_text", "") for t in props.get("Name", {}).get("title", []))
+        title = "".join(t.get("plain_text", "") for t in props.get("To-Do", {}).get("title", []))
         day_val = props.get("Day", {}).get("select", {}).get("name", "")
         if title:
             items.append((title, day_val))
@@ -165,8 +162,7 @@ async def cerebras_chat(prompt: str):
             return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
         log.error(f"LLM Error: {e}")
-        if 'r' in locals():
-            log.error(f"RESPONSE TEXT: {r.text}")
+        if 'r' in locals(): log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I hit a small issue."
 
 # ==============================================================
@@ -212,24 +208,24 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
             log.info(f"User said: {user_text}")
 
             low = user_text.lower()
-            if "plate" in low or "add" in low or "book" in low or "what" in low:
+
+            # Handle plate requests
+            if "plate" in low:
                 if "add" in low or "book" in low:
                     await speak(response_id, "Got it. Adding that now...", end_turn=False)
                     title = extract_title(user_text)
                     day = find_day(user_text)
-                    async def add_task():
-                        msg = await add_to_notion(title or "New Task", day)
-                        await speak(response_id, msg)
-                    asyncio.create_task(add_task())
+                    asyncio.create_task(
+                        speak(response_id, await add_to_notion(title or "New Task", day))
+                    )
                     continue
 
-                elif "what" in low:
+                if "what" in low:
                     await speak(response_id, "Checking that now...", end_turn=False)
-                    async def read_task():
-                        day_ = find_day(user_text)
-                        msg = await read_from_notion(day_)
-                        await speak(response_id, msg)
-                    asyncio.create_task(read_task())
+                    day_ = find_day(user_text)
+                    asyncio.create_task(
+                        speak(response_id, await read_from_notion(day_))
+                    )
                     continue
 
             reply = await cerebras_chat(user_text)

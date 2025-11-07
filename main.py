@@ -90,7 +90,6 @@ async def add_to_notion(title: str, day: str | None):
     week = infer_week(day)
     props = {
         "To-Do": {"title": [{"text": {"content": title}}]},
-        # dynamically handle Status or Select types
         "Plate": {"status": {"name": "Plate"}},
         "Type": {"status": {"name": "Task"}},
         "Week": {"select": {"name": week}},
@@ -110,7 +109,9 @@ async def add_to_notion(title: str, day: str | None):
         return f"Added “{title}” to your plate{f' for {day}' if day else ''}."
     except Exception as e:
         log.error(f"❌ Notion add error: {e}")
-        if 'r' in locals(): log.error(f"RESPONSE TEXT: {r.text}")
+        if 'r' in locals():
+            log.error(f"RESPONSE CODE: {r.status_code}")
+            log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t add that to your plate."
 
 # ==============================================================
@@ -128,7 +129,9 @@ async def read_from_notion(day: str | None):
             data = r.json()
     except Exception as e:
         log.error(f"❌ Notion read error: {e}")
-        if 'r' in locals(): log.error(f"RESPONSE TEXT: {r.text}")
+        if 'r' in locals():
+            log.error(f"RESPONSE CODE: {r.status_code}")
+            log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t read your plate right now."
 
     items = []

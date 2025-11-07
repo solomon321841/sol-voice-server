@@ -128,6 +128,19 @@ async def get_latest_prompt():
         return "You are Solomon Roth’s AI assistant."
 
 # =====================================================
+# 🧩 ADMIN PANEL PROMPT FETCH ENDPOINT
+# =====================================================
+@app.get("/prompt")
+async def get_prompt():
+    """Return the current system prompt text for the admin panel."""
+    try:
+        prompt_text = await get_latest_prompt()
+        return JSONResponse({"prompt": prompt_text})
+    except Exception as e:
+        log.error(f"❌ Error loading prompt for admin panel: {e}")
+        return JSONResponse({"prompt": "⚠️ Failed to load prompt."})
+
+# =====================================================
 # 🧩 n8n HELPERS
 # =====================================================
 async def send_to_n8n_calendar(user_message: str) -> str:

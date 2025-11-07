@@ -22,6 +22,7 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
 
+# Environment variables
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
 MEMO_API_KEY = os.getenv("MEMO_API_KEY", "")
 NOTION_TASKS_API_KEY = os.getenv("NOTION_TASKS_API_KEY", "")
@@ -40,6 +41,47 @@ async def health():
 async def index(request: Request):
     _ = await request.body()
     return JSONResponse({"ok": True})
+
+# ==============================================================
+# MEM0 MEMORY FUNCTIONS
+# ==============================================================
+
+async def mem0_search_v2(query: str):
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.post(
+                "https://api.mem0.ai/v2/search",
+                headers={"Authorization": f"Bearer {MEMO_API_KEY}"},
+                json={"query": query, "limit": 5},
+            )
+            res.raise_for_status()
+            data = res.json()
+            if "results" in data and len(data["results"]) > 0:
+                return "\n".join([r["text"] for r in data["results"]])
+            return ""
+    except Exception as e:
+        log.error(f"Mem0 Search Error: {e}")
+        return ""
+
+async def mem0_add_v1(text: str):
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.post(
+                "https://api.mem0.ai/v1/add",
+                headers={"Authorization": f"Bearer {MEMO_API_KEY}"},
+                json={"text": text},
+            )
+            res.raise_for_status()
+            return True
+    except Exception as e:
+        log.error(f"Mem0 Add Error: {e}")
+        return False
+
+async def build_memory_context(user_text: str):
+    memory = await mem0_search_v2(user_text)
+    if memory:
+        return f"Previously, you noted: {memory}\n\nNow, continue the conversation."
+    return "Continue conversation naturally."
 
 # ==============================================================
 # HELPERS
@@ -83,55 +125,64 @@ def notion_headers():
     }
 
 # ==============================================================
-# 🔹 ADD TO NOTION
+# 🔹 ADD TO NOTION (Debug Mode)
 # ==============================================================
 
 async def add_to_notion(title: str, day: str | None):
     week = infer_week(day)
     props = {
         "To-Do": {"title": [{"text": {"content": title}}]},
-        "Plate": {"status": {"name": "Plate"}},
-        "Type": {"status": {"name": "Task"}},
         "Week": {"select": {"name": week}},
     }
     if day:
         props["Day"] = {"select": {"name": day}}
 
-    payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": props}
+    for field, value in {"Plate": "Plate", "Type": "Task"}.items():
+        for mode in ["status", "select"]:
+            props[field] = {mode: {"name": value}}
+            payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": props}
 
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post("https://api.notion.com/v1/pages",
-                                  headers=notion_headers(),
-                                  json=payload)
-            r.raise_for_status()
-        log.info(f"✅ Added to Notion: {title}")
-        return f"Added “{title}” to your plate{f' for {day}' if day else ''}."
-    except Exception as e:
-        log.error(f"❌ Notion add error: {e}")
-        if 'r' in locals():
-            log.error(f"RESPONSE CODE: {r.status_code}")
-            log.error(f"RESPONSE TEXT: {r.text}")
-        return "Sorry, I couldn’t add that to your plate."
+            log.info("🟡 SENDING TO NOTION:")
+            log.info(json.dumps(payload, indent=2))
+
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    r = await client.post("https://api.notion.com/v1/pages",
+                                          headers=notion_headers(),
+                                          json=payload)
+                log.info(f"🟢 RESPONSE CODE: {r.status_code}")
+                log.info(f"🟢 RESPONSE TEXT: {r.text}")
+
+                if r.status_code in [200, 201]:
+                    log.info(f"✅ Added {title} using {mode} for {field}")
+                    await mem0_add_v1(f"Added task '{title}' for {day or 'unspecified day'}")
+                    return f"Added “{title}” to your plate{f' for {day}' if day else ''}."
+            except Exception as e:
+                log.error(f"❌ Notion add error ({mode} {field}): {e}")
+                continue
+
+    return "Sorry, I couldn’t add that to your plate."
 
 # ==============================================================
-# 🔹 READ FROM NOTION
+# 🔹 READ FROM NOTION (Debug Mode)
 # ==============================================================
 
 async def read_from_notion(day: str | None):
     url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     query = {"filter": {"property": "Day", "select": {"equals": day}}} if day else {}
 
+    log.info("🟡 QUERYING NOTION:")
+    log.info(json.dumps(query, indent=2))
+
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.post(url, headers=notion_headers(), json=query)
+            log.info(f"🟢 RESPONSE CODE: {r.status_code}")
+            log.info(f"🟢 RESPONSE TEXT: {r.text}")
             r.raise_for_status()
             data = r.json()
     except Exception as e:
         log.error(f"❌ Notion read error: {e}")
-        if 'r' in locals():
-            log.error(f"RESPONSE CODE: {r.status_code}")
-            log.error(f"RESPONSE TEXT: {r.text}")
         return "Sorry, I couldn’t read your plate right now."
 
     items = []
@@ -147,12 +198,14 @@ async def read_from_notion(day: str | None):
 
     if day:
         listing = ", ".join(t for t, _ in items)
+        await mem0_add_v1(f"Read tasks for {day}: {listing}")
         return f"Here’s what’s on your plate for {day}: {listing}."
     else:
         grouped = {}
         for t, d in items:
             grouped.setdefault(d or "Unscheduled", []).append(t)
         parts = [f"{d}: " + ", ".join(arr) for d, arr in grouped.items()]
+        await mem0_add_v1("Read full plate overview.")
         return " | ".join(parts)
 
 # ==============================================================
@@ -160,12 +213,14 @@ async def read_from_notion(day: str | None):
 # ==============================================================
 
 async def cerebras_chat(prompt: str):
-    if not CEREBRAS_API_KEY:
-        return "Cerebras key missing."
     headers = {"Authorization": f"Bearer {CEREBRAS_API_KEY}",
                "Content-Type": "application/json"}
+    context = await build_memory_context(prompt)
     data = {"model": "llama3.1-8b",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": "You are Solomon’s personal AI assistant."},
+                {"role": "system", "content": context},
+                {"role": "user", "content": prompt}],
             "max_tokens": 300, "temperature": 0.7}
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -219,10 +274,8 @@ async def websocket_endpoint(ws: WebSocket, call_id: str):
                 continue
 
             log.info(f"User said: {user_text}")
-
             low = user_text.lower()
 
-            # Handle plate requests
             if "plate" in low:
                 if "add" in low or "book" in low:
                     await speak(response_id, "Got it. Adding that now...", end_turn=False)

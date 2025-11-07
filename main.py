@@ -97,7 +97,7 @@ def build_memory_context(items: list) -> str:
 # =====================================================
 # 🤖 GPT-5-o CHAT
 # =====================================================
-GPT_MODEL = "gpt-5o"
+GPT_MODEL = "gpt-4o"
 
 async def openai_chat(messages: List[Dict[str, str]]) -> str:
     if not OPENAI_API_KEY:

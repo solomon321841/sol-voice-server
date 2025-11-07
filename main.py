@@ -168,7 +168,7 @@ async def send_to_n8n_calendar(user_message: str) -> str:
 # 🧩 PLATE (NOTION) WORKFLOW
 # =====================================================
 async def send_to_plate(user_message: str) -> str:
-    """Send user message to Notion Plate workflow and return clean reply."""
+    """Send user message to Notion Plate workflow and return clean reply (handles dict OR list)."""
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             payload = {"message": user_message}
@@ -189,14 +189,14 @@ async def send_to_plate(user_message: str) -> str:
                             return str(reply_text).strip()
                         return json.dumps(data, indent=2)
                     elif isinstance(data, list):
-                        # ✅ Extract readable reply if n8n sends [{"reply": "..."}]
-                        reply_texts = []
+                        # Handle [{"reply": "..."}] or similar
+                        parts = []
                         for x in data:
                             if isinstance(x, dict):
-                                reply_texts.append(x.get("reply") or x.get("message") or str(x))
+                                parts.append(x.get("reply") or x.get("message") or x.get("text") or str(x))
                             else:
-                                reply_texts.append(str(x))
-                        return " ".join(reply_texts)
+                                parts.append(str(x))
+                        return " ".join(parts).strip()
                     else:
                         return str(data).strip()
                 except Exception:
@@ -330,11 +330,11 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
 
     except WebSocketDisconnect:
         log.info(f"❌ Retell WebSocket disconnected: {call_id}")
+    except Exception as e:
+        log.error(f"WebSocket error: {e}")
     finally:
         active_connections.discard(call_id)
         log.info(f"🔕 Connection closed and removed: {call_id}")
-    except Exception as e:
-        log.error(f"WebSocket error: {e}")
 
 # =====================================================
 # 🚀 SERVER STARTUP

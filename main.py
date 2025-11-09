@@ -46,11 +46,7 @@ GPT_MODEL = "gpt-4o-mini"
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "*",
-        "https://sol-voice-ui.netlify.app",
-        "http://localhost:3000"
-    ],
+    allow_origins=["*", "https://sol-voice-ui.netlify.app", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -120,6 +116,7 @@ async def get_latest_prompt():
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             res = await client.get(url, headers=headers)
+            res.raise_for_status()
             data = res.json()
             text_parts = []
             for block in data.get("results", []):
@@ -179,6 +176,7 @@ active_connections: Dict[str, WebSocket] = {}
 
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
+    # Close duplicate sessions
     old_ws = active_connections.get(call_id)
     if old_ws:
         try:

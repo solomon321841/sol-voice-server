@@ -13,26 +13,36 @@ from pyngrok import ngrok
 import time
 from openai import AsyncOpenAI
 
-# ============ Logging ============
+# =====================================================
+# 🔧 LOGGING SETUP
+# =====================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("main")
 
-# ============ Env ============
+# =====================================================
+# 🔑 ENVIRONMENT VARIABLES
+# =====================================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
 
-# ============ n8n Webhooks ============
+# =====================================================
+# 🌐 EXTERNAL ENDPOINTS
+# =====================================================
 N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
 N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
-# ============ OpenAI Client ============
+# =====================================================
+# 🧠 MODEL CONFIGURATION
+# =====================================================
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 GPT_MODEL = "gpt-4o-mini"
 
-# ============ FastAPI ============
+# =====================================================
+# ⚙️ FASTAPI SETUP
+# =====================================================
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -59,19 +69,14 @@ async def webhook_sink(request: Request):
 async def mem0_search_v2(user_id: str, query: str):
     if not MEMO_API_KEY:
         return []
-    url = "https://api.mem0.ai/v2/memories/"
     headers = {"Authorization": f"Token {MEMO_API_KEY}"}
     payload = {"filters": {"user_id": user_id}, "query": query}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(url, headers=headers, json=payload)
+            r = await client.post("https://api.mem0.ai/v2/memories/", headers=headers, json=payload)
         if r.status_code == 200:
             data = r.json()
-            if isinstance(data, list):
-                log.info(f"🧠 Found {len(data)} memories for {user_id}")
-                return data
-        else:
-            log.warning(f"⚠️ Mem0 v2 search failed ({r.status_code}): {r.text}")
+            return data if isinstance(data, list) else []
     except Exception as e:
         log.error(f"🔥 Mem0 v2 search error: {e}")
     return []
@@ -79,21 +84,18 @@ async def mem0_search_v2(user_id: str, query: str):
 async def mem0_add_v1(user_id: str, text: str):
     if not MEMO_API_KEY or not text:
         return
-    url = "https://api.mem0.ai/v1/memories/"
     headers = {"Authorization": f"Token {MEMO_API_KEY}"}
     payload = {"user_id": user_id, "messages": [{"role": "user", "content": text}]}
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(url, headers=headers, json=payload)
+            await client.post("https://api.mem0.ai/v1/memories/", headers=headers, json=payload)
         log.info(f"✅ Memory added for {user_id}")
     except Exception as e:
         log.error(f"🔥 Error adding memory to Mem0: {e}")
 
 def build_memory_context(items: list) -> str:
-    if not items:
-        return ""
     lines = []
-    for it in items:
+    for it in items or []:
         if isinstance(it, dict):
             content = it.get("memory") or it.get("content") or it.get("text")
             if content:
@@ -113,26 +115,23 @@ async def get_latest_prompt():
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             res = await client.get(url, headers=headers)
-            res.raise_for_status()
             data = res.json()
             text_parts = []
             for block in data.get("results", []):
                 if block.get("type") == "paragraph":
-                    text = "".join(
-                        [r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])]
-                    )
+                    text = "".join([r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])])
                     text_parts.append(text)
-            return "\n".join(text_parts).strip() or "You are Solomon Roth’s AI assistant."
+            return "\n".join(text_parts).strip() or "You are Solomon Roth’s AI assistant, Silas."
     except Exception as e:
         log.error(f"❌ Error fetching prompt from Notion: {e}")
-        return "You are Solomon Roth’s AI assistant."
+        return "You are Solomon Roth’s AI assistant, Silas."
 
 # =====================================================
-# 🧩 ADMIN PANEL PROMPT FETCH ENDPOINT (Plain Text)
+# 🧩 ADMIN PANEL PROMPT FETCH (PLAIN TEXT)
 # =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt():
-    """Return the current system prompt text as plain text for admin panel."""
+    """Return the system prompt as plain text (for admin panel)."""
     try:
         prompt_text = await get_latest_prompt()
         return PlainTextResponse(prompt_text)
@@ -146,28 +145,27 @@ async def get_prompt():
 async def send_to_n8n_calendar(user_message: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(N8N_CALENDAR_URL, json={"message": user_message})
-            log.info(f"📩 n8n calendar response: {response.text}")
-            return response.text.strip() if response.status_code == 200 else "Calendar workflow error."
+            r = await client.post(N8N_CALENDAR_URL, json={"message": user_message})
+            if r.status_code == 200:
+                return r.text.strip()
     except Exception as e:
-        log.error(f"❌ Error sending to calendar: {e}")
-    return "Sorry, couldn’t reach your calendar."
+        log.error(f"❌ Calendar error: {e}")
+    return "Sorry, couldn't reach your calendar."
 
 async def send_to_plate(user_message: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(N8N_PLATE_URL, json={"message": user_message})
-            log.info(f"🍽️ Plate response: {response.text}")
-            if response.status_code == 200:
-                data = response.json()
+            r = await client.post(N8N_PLATE_URL, json={"message": user_message})
+            log.info(f"🍽️ Plate response: {r.text}")
+            if r.status_code == 200:
+                data = r.json()
                 if isinstance(data, list) and data and "reply" in data[0]:
                     return data[0]["reply"]
-                elif isinstance(data, dict):
-                    return data.get("reply") or data.get("message") or response.text
-            return "Plate workflow error."
+                if isinstance(data, dict):
+                    return data.get("reply") or data.get("message") or r.text
     except Exception as e:
-        log.error(f"❌ Error sending to plate: {e}")
-    return "Sorry, couldn’t reach your plate."
+        log.error(f"❌ Plate error: {e}")
+    return "Sorry, couldn't reach your plate."
 
 # =====================================================
 # 🔌 RETELL CONNECTION
@@ -176,7 +174,6 @@ active_connections: Dict[str, WebSocket] = {}
 
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
-    # Close any existing connection for this call_id
     old_ws = active_connections.get(call_id)
     if old_ws:
         try:
@@ -187,7 +184,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     active_connections[call_id] = websocket
 
     await websocket.accept()
-    log.info(f"🔌 Retell WebSocket connected: {call_id}")
+    log.info(f"🔌 Connected: {call_id}")
     user_id = "solomon_roth"
 
     async def send_speech(response_id: int, text: str, end_turn: bool = True):
@@ -202,12 +199,12 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
             await websocket.send_text(json.dumps(payload))
             log.info(f"🗣️ Sent: {text[:80]}")
         except Exception as e:
-            log.error(f"WebSocket send error: {e}")
+            log.error(f"Send error: {e}")
 
-    # --- Custom greeting from Notion ---
-    prompt_text = await get_latest_prompt()
-    first_line = prompt_text.splitlines()[0] if prompt_text else ""
-    greeting = first_line if first_line else "Hello Solomon, I'm ready whenever you are."
+    # Greeting
+    notion_prompt = await get_latest_prompt()
+    first_line = notion_prompt.splitlines()[0] if notion_prompt else ""
+    greeting = first_line or "Hello Solomon, I’m Silas. Ready when you are."
     await send_speech(0, greeting)
 
     calendar_keywords = ["schedule", "meeting", "calendar", "cancel", "appointment"]
@@ -218,20 +215,16 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
     try:
         while True:
             raw = await websocket.receive_text()
-            try:
-                data = json.loads(raw)
-            except Exception:
-                continue
-
+            data = json.loads(raw)
             transcript = data.get("transcript", [])
             interaction_type = data.get("interaction_type")
             response_id = int(data.get("response_id", 1))
+
             user_message = ""
-            if transcript and isinstance(transcript, list):
-                for t in reversed(transcript):
-                    if t.get("role") == "user":
-                        user_message = t.get("content", "").strip()
-                        break
+            for t in reversed(transcript or []):
+                if t.get("role") == "user":
+                    user_message = t.get("content", "").strip()
+                    break
 
             if interaction_type == "response_required" and user_message:
                 now = time.time()
@@ -241,29 +234,27 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
 
                 mem_items = await mem0_search_v2(user_id, user_message)
                 context = build_memory_context(mem_items)
-                notion_prompt = await get_latest_prompt()
+                system_prompt = f"{notion_prompt}\n\nFacts:\n{context}"
 
                 if any(k in user_message.lower() for k in plate_keywords):
                     await send_speech(response_id, "Got it, adding that now...", end_turn=False)
                     reply = await send_to_plate(user_message)
                     await send_speech(response_id, reply)
                     continue
+
                 if any(k in user_message.lower() for k in calendar_keywords):
-                    await send_speech(response_id, "Let me check your calendar...", end_turn=False)
+                    await send_speech(response_id, "Checking your calendar...", end_turn=False)
                     reply = await send_to_n8n_calendar(user_message)
                     await send_speech(response_id, reply)
                     continue
 
-                system_prompt = f"{notion_prompt}\n\nFacts:\n{context}"
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ]
-
                 try:
                     stream = await openai_client.chat.completions.create(
                         model=GPT_MODEL,
-                        messages=messages,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message},
+                        ],
                         max_tokens=150,
                         temperature=0.7,
                         stream=True,
@@ -273,45 +264,27 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                         if delta:
                             await send_speech(response_id, delta, end_turn=False)
                     await send_speech(response_id, "", end_turn=True)
-                    if user_message:
-                        asyncio.create_task(mem0_add_v1(user_id, user_message))
+                    asyncio.create_task(mem0_add_v1(user_id, user_message))
                 except Exception as e:
-                    log.error(f"⚠️ Stream failed, fallback: {e}")
-                    try:
-                        comp = await openai_client.chat.completions.create(
-                            model=GPT_MODEL,
-                            messages=messages,
-                            max_tokens=150,
-                            temperature=0.7,
-                        )
-                        reply = comp.choices[0].message.content
-                        await send_speech(response_id, reply)
-                    except Exception as e2:
-                        log.error(f"❌ GPT fallback error: {e2}")
-                        await send_speech(response_id, "Sorry, I ran into a small hiccup.")
-
+                    log.error(f"⚠️ Stream error: {e}")
+                    await send_speech(response_id, "Sorry, I ran into a small hiccup.")
     except WebSocketDisconnect:
         log.info(f"❌ Disconnected: {call_id}")
     finally:
-        try:
-            if call_id in active_connections:
-                del active_connections[call_id]
-                log.info(f"🔕 Closed session for {call_id}")
-        except Exception as e:
-            log.error(f"Cleanup error: {e}")
+        active_connections.pop(call_id, None)
+        log.info(f"🔕 Closed: {call_id}")
 
 # =====================================================
-# 🚀 SERVER STARTUP
+# 🚀 START SERVER
 # =====================================================
 def start_ngrok(port: int = 8000) -> str:
     tunnel = ngrok.connect(addr=port, proto="http")
     url = tunnel.public_url.replace("http://", "https://")
     log.info(f"🌐 Public URL: {url}")
-    log.info(f"🔗 Retell Custom LLM URL: wss://{url.replace('https://', '')}/ws/{{call_id}}")
+    log.info(f"🔗 Retell LLM URL: wss://{url.replace('https://', '')}/ws/{{call_id}}")
     return url
 
 if __name__ == "__main__":
     start_ngrok(8000)
-    log.info("🚀 FastAPI running...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 

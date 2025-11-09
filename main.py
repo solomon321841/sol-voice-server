@@ -14,13 +14,13 @@ import time
 from openai import AsyncOpenAI
 
 # =====================================================
-# 🔧 LOGGING SETUP
+# 🔧 LOGGING
 # =====================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("main")
 
 # =====================================================
-# 🔑 ENVIRONMENT VARIABLES
+# 🔑 ENV VARIABLES
 # =====================================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -29,13 +29,13 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
 
 # =====================================================
-# 🌐 EXTERNAL ENDPOINTS
+# 🌐 EXTERNAL WEBHOOKS
 # =====================================================
 N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
 N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
 # =====================================================
-# 🧠 MODEL CONFIGURATION
+# 🧠 MODEL
 # =====================================================
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 GPT_MODEL = "gpt-4o-mini"
@@ -46,9 +46,14 @@ GPT_MODEL = "gpt-4o-mini"
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=[
+        "*",
+        "https://sol-voice-ui.netlify.app",
+        "http://localhost:3000"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
 @app.get("/health")
@@ -103,7 +108,7 @@ def build_memory_context(items: list) -> str:
     return "Relevant memories:\n" + "\n".join(lines) if lines else ""
 
 # =====================================================
-# 🧩 FETCH PROMPT LIVE FROM NOTION
+# 🧩 FETCH PROMPT FROM NOTION
 # =====================================================
 async def get_latest_prompt():
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
@@ -131,13 +136,13 @@ async def get_latest_prompt():
 # =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt():
-    """Return the system prompt as plain text (for admin panel)."""
+    """Return the system prompt as plain text for admin panel UI."""
     try:
         prompt_text = await get_latest_prompt()
-        return PlainTextResponse(prompt_text)
+        return PlainTextResponse(prompt_text or "⚠️ No prompt found in Notion.")
     except Exception as e:
-        log.error(f"❌ Error loading prompt for admin panel: {e}")
-        return PlainTextResponse("⚠️ Failed to load prompt.")
+        log.error(f"❌ Error serving /prompt: {e}")
+        return PlainTextResponse("⚠️ Failed to load prompt from Notion.")
 
 # =====================================================
 # 🧩 n8n HELPERS
@@ -201,7 +206,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         except Exception as e:
             log.error(f"Send error: {e}")
 
-    # Greeting
     notion_prompt = await get_latest_prompt()
     first_line = notion_prompt.splitlines()[0] if notion_prompt else ""
     greeting = first_line or "Hello Solomon, I’m Silas. Ready when you are."
@@ -275,7 +279,7 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
         log.info(f"🔕 Closed: {call_id}")
 
 # =====================================================
-# 🚀 START SERVER
+# 🚀 SERVER START
 # =====================================================
 def start_ngrok(port: int = 8000) -> str:
     tunnel = ngrok.connect(addr=port, proto="http")

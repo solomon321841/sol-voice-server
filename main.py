@@ -6,7 +6,7 @@ from typing import List, Dict
 from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from pyngrok import ngrok
@@ -101,7 +101,7 @@ def build_memory_context(items: list) -> str:
     return "Relevant memories:\n" + "\n".join(lines) if lines else ""
 
 # =====================================================
-# 🧩 FETCH PROMPT LIVE FROM NOTION (Custom Greeting)
+# 🧩 FETCH PROMPT LIVE FROM NOTION
 # =====================================================
 async def get_latest_prompt():
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
@@ -128,17 +128,17 @@ async def get_latest_prompt():
         return "You are Solomon Roth’s AI assistant."
 
 # =====================================================
-# 🧩 ADMIN PANEL PROMPT FETCH ENDPOINT
+# 🧩 ADMIN PANEL PROMPT FETCH ENDPOINT (Plain Text)
 # =====================================================
-@app.get("/prompt")
+@app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt():
-    """Return the current system prompt text for the admin panel."""
+    """Return the current system prompt text as plain text for admin panel."""
     try:
         prompt_text = await get_latest_prompt()
-        return JSONResponse({"prompt": prompt_text})
+        return PlainTextResponse(prompt_text)
     except Exception as e:
         log.error(f"❌ Error loading prompt for admin panel: {e}")
-        return JSONResponse({"prompt": "⚠️ Failed to load prompt."})
+        return PlainTextResponse("⚠️ Failed to load prompt.")
 
 # =====================================================
 # 🧩 n8n HELPERS
@@ -170,14 +170,13 @@ async def send_to_plate(user_message: str) -> str:
     return "Sorry, couldn’t reach your plate."
 
 # =====================================================
-# 🔌 RETELL CONNECTION (Single-Session + Greeting)
+# 🔌 RETELL CONNECTION
 # =====================================================
-
 active_connections: Dict[str, WebSocket] = {}
 
 @app.websocket("/ws/{call_id}")
 async def websocket_endpoint(websocket: WebSocket, call_id: str):
-    # ✅ Force close any existing session for this call_id
+    # Close any existing connection for this call_id
     old_ws = active_connections.get(call_id)
     if old_ws:
         try:
@@ -261,7 +260,6 @@ async def websocket_endpoint(websocket: WebSocket, call_id: str):
                     {"role": "user", "content": user_message},
                 ]
 
-                # Hybrid streaming with fallback
                 try:
                     stream = await openai_client.chat.completions.create(
                         model=GPT_MODEL,

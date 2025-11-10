@@ -169,20 +169,20 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS (duplicate prevention & safe cleanup)
+# 🔌 RETELL WS (Text-based debounce)
 # =====================================================
 connections = {}
 
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
-    # If a connection with the same call_id exists, close it
+    # Close any existing call_id connection
     if call_id in connections:
         try:
             await connections[call_id]["ws"].close()
         except Exception:
             pass
 
-    connections[call_id] = {"ws": ws, "active_responses": set()}
+    connections[call_id] = {"ws": ws}
     await ws.accept()
     user_id = "solomon_roth"
 
@@ -192,7 +192,7 @@ async def ws_handler(ws: WebSocket, call_id: str):
             "response_id": resp_id,
             "content": text,
             "content_complete": end,
-            "end_turn": end
+            "end_turn": end,
         }
         await ws.send_text(json.dumps(payload))
         log.info(f"🗣️ {text[:80]}")
@@ -217,61 +217,57 @@ async def ws_handler(ws: WebSocket, call_id: str):
                 if t.get("role") == "user":
                     msg = t.get("content", "").strip()
                     break
-
-            # 🧩 Prevent double triggers
-            if rid in connections[call_id]["active_responses"]:
-                log.info(f"🛑 Skipping duplicate response_id {rid}")
+            if not (inter == "response_required" and msg):
                 continue
-            connections[call_id]["active_responses"].add(rid)
 
-            if inter == "response_required" and msg:
-                now = time.time()
-                same = msg.strip().lower() == (last_msg["t"] or "").strip().lower()
-                subset = (
-                    msg.strip().lower().startswith((last_msg["t"] or "").strip().lower())
-                    or (last_msg["t"] or "").strip().lower().startswith(msg.strip().lower())
+            # 🧩 Strong text-based debounce
+            now = time.time()
+            same = msg.lower() == (last_msg["t"] or "").lower()
+            subset = (
+                msg.lower().startswith((last_msg["t"] or "").lower())
+                or (last_msg["t"] or "").lower().startswith(msg.lower())
+            )
+            if (same or subset) and now - last_msg["time"] < 2:
+                log.info("🛑 Skipping near-duplicate text.")
+                continue
+            last_msg = {"t": msg, "time": now}
+
+            mems = await mem0_search(user_id, msg)
+            ctx = memory_context(mems)
+            sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
+
+            if any(k in msg.lower() for k in plate_kw):
+                await speak(rid, "On it...", end=False)
+                rep = await send_to_n8n(N8N_PLATE_URL, msg)
+                await speak(rid, rep)
+                continue
+
+            if any(k in msg.lower() for k in calendar_kw):
+                await speak(rid, "Checking your schedule...", end=False)
+                rep = await send_to_n8n(N8N_CALENDAR_URL, msg)
+                await speak(rid, rep)
+                continue
+
+            try:
+                stream = await openai_client.chat.completions.create(
+                    model=GPT_MODEL,
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": msg},
+                    ],
+                    max_tokens=150,
+                    temperature=0.7,
+                    stream=True,
                 )
-                if (same or subset) and now - last_msg["time"] < 3:
-                    log.info("🛑 Skipping near-duplicate message.")
-                    continue
-                last_msg = {"t": msg, "time": now}
-
-                mems = await mem0_search(user_id, msg)
-                ctx = memory_context(mems)
-                sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
-
-                if any(k in msg.lower() for k in plate_kw):
-                    await speak(rid, "On it...", end=False)
-                    rep = await send_to_n8n(N8N_PLATE_URL, msg)
-                    await speak(rid, rep)
-                    continue
-
-                if any(k in msg.lower() for k in calendar_kw):
-                    await speak(rid, "Checking your schedule...", end=False)
-                    rep = await send_to_n8n(N8N_CALENDAR_URL, msg)
-                    await speak(rid, rep)
-                    continue
-
-                try:
-                    stream = await openai_client.chat.completions.create(
-                        model=GPT_MODEL,
-                        messages=[
-                            {"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": msg}
-                        ],
-                        max_tokens=150,
-                        temperature=0.7,
-                        stream=True,
-                    )
-                    async for chunk in stream:
-                        delta = getattr(chunk.choices[0].delta, "content", None)
-                        if delta:
-                            await speak(rid, delta, end=False)
-                    await speak(rid, "", end=True)
-                    asyncio.create_task(mem0_add(user_id, msg))
-                except Exception as e:
-                    log.error(f"LLM stream error: {e}")
-                    await speak(rid, "Sorry, I hit a small issue.")
+                async for chunk in stream:
+                    delta = getattr(chunk.choices[0].delta, "content", None)
+                    if delta:
+                        await speak(rid, delta, end=False)
+                await speak(rid, "", end=True)
+                asyncio.create_task(mem0_add(user_id, msg))
+            except Exception as e:
+                log.error(f"LLM stream error: {e}")
+                await speak(rid, "Sorry, I hit a small issue.")
     except WebSocketDisconnect:
         log.info(f"❌ Disconnected {call_id}")
     finally:

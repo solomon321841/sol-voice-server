@@ -53,7 +53,6 @@ app.add_middleware(
 
 @app.get("/")
 async def home():
-    """Default route just confirms backend is live."""
     return {"status": "running", "message": "Silas backend is online."}
 
 @app.get("/health")
@@ -131,16 +130,14 @@ async def get_notion_prompt():
 # =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt_text():
-    """Serves live prompt text to admin panel."""
     text = await get_notion_prompt()
     headers = {"Access-Control-Allow-Origin": "*"}
     return PlainTextResponse(text, headers=headers)
 
 # =====================================================
-# 🧩 n8n HELPERS (with improved readable logic)
+# 🧩 n8n HELPERS
 # =====================================================
 async def send_to_n8n(url: str, message: str) -> str:
-    """Send message to n8n webhook and return a clean, readable reply."""
     try:
         async with httpx.AsyncClient(timeout=20) as c:
             payload = {"message": message}
@@ -148,7 +145,6 @@ async def send_to_n8n(url: str, message: str) -> str:
             log.info(f"📩 n8n raw response ({url}): {r.text}")
 
             if r.status_code == 200:
-                # Try parsing JSON first
                 try:
                     data = r.json()
                     if isinstance(data, dict):
@@ -160,8 +156,7 @@ async def send_to_n8n(url: str, message: str) -> str:
                             or json.dumps(data, indent=2)
                         ).strip()
                     elif isinstance(data, list):
-                        joined = " ".join(str(x) for x in data)
-                        return joined.strip()
+                        return " ".join(str(x) for x in data).strip()
                     else:
                         return str(data).strip()
                 except Exception:
@@ -174,18 +169,20 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS
+# 🔌 RETELL WS (duplicate prevention & safe cleanup)
 # =====================================================
 connections = {}
 
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
+    # If a connection with the same call_id exists, close it
     if call_id in connections:
         try:
-            await connections[call_id].close()
+            await connections[call_id]["ws"].close()
         except Exception:
             pass
-    connections[call_id] = ws
+
+    connections[call_id] = {"ws": ws, "active_responses": set()}
     await ws.accept()
     user_id = "solomon_roth"
 
@@ -221,9 +218,21 @@ async def ws_handler(ws: WebSocket, call_id: str):
                     msg = t.get("content", "").strip()
                     break
 
+            # 🧩 Prevent double triggers
+            if rid in connections[call_id]["active_responses"]:
+                log.info(f"🛑 Skipping duplicate response_id {rid}")
+                continue
+            connections[call_id]["active_responses"].add(rid)
+
             if inter == "response_required" and msg:
                 now = time.time()
-                if msg == last_msg["t"] and now - last_msg["time"] < 3:
+                same = msg.strip().lower() == (last_msg["t"] or "").strip().lower()
+                subset = (
+                    msg.strip().lower().startswith((last_msg["t"] or "").strip().lower())
+                    or (last_msg["t"] or "").strip().lower().startswith(msg.strip().lower())
+                )
+                if (same or subset) and now - last_msg["time"] < 3:
+                    log.info("🛑 Skipping near-duplicate message.")
                     continue
                 last_msg = {"t": msg, "time": now}
 

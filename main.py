@@ -170,23 +170,29 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — smart context phrases + debounce
+# 🔌 RETELL WS — Single Voice Connection Fix
 # =====================================================
 connections = {}
 
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
-    # Close any old connection with same call_id
-    if call_id in connections:
+    # 🧩 Always close any previous active connection to prevent double voice
+    for cid, conn in list(connections.items()):
         try:
-            await connections[call_id]["ws"].close()
+            if conn["ws"].client_state.name == "CONNECTED":
+                log.info(f"🔇 Closing previous WebSocket: {cid}")
+                await conn["ws"].close()
         except Exception:
             pass
-    connections[call_id] = {"ws": ws}
+        connections.pop(cid, None)
+
+    connections[call_id] = {"ws": ws, "active": True}
     await ws.accept()
     user_id = "solomon_roth"
 
     async def speak(resp_id, text, end=True):
+        if not connections.get(call_id, {}).get("active"):
+            return
         payload = {
             "type": "response_message",
             "response_id": resp_id,
@@ -194,8 +200,11 @@ async def ws_handler(ws: WebSocket, call_id: str):
             "content_complete": end,
             "end_turn": end,
         }
-        await ws.send_text(json.dumps(payload))
-        log.info(f"🗣️ {text[:80]}")
+        try:
+            await ws.send_text(json.dumps(payload))
+            log.info(f"🗣️ {text[:80]}")
+        except Exception:
+            log.warning("Attempted to speak after disconnect — ignored.")
 
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
@@ -208,7 +217,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
     plate_add_kw = ["add", "put", "create", "new", "include"]
     plate_check_kw = ["what", "show", "see", "check", "read"]
 
-    # Natural rotating phrases
     add_phrases = [
         "Alright, let me add that for you...",
         "Sure thing, I’ll take care of adding that...",
@@ -231,6 +239,9 @@ async def ws_handler(ws: WebSocket, call_id: str):
     try:
         while True:
             raw = await ws.receive_text()
+            if not connections.get(call_id, {}).get("active"):
+                break
+
             data = json.loads(raw)
             trans = data.get("transcript", [])
             inter = data.get("interaction_type")
@@ -243,7 +254,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
             if not (inter == "response_required" and msg):
                 continue
 
-            # 🧩 Strong text-based debounce
             now = time.time()
             same = msg.lower() == (last_msg["t"] or "").lower()
             subset = (
@@ -258,12 +268,10 @@ async def ws_handler(ws: WebSocket, call_id: str):
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
-
             lower_msg = msg.lower()
 
-            # 🧩 PLATE LOGIC
+            # 🧩 PLATE HANDLING
             if any(k in lower_msg for k in plate_kw):
-                # decide if adding or checking
                 if any(k in lower_msg for k in plate_add_kw):
                     phrase = random.choice(add_phrases)
                 elif any(k in lower_msg for k in plate_check_kw):
@@ -275,14 +283,14 @@ async def ws_handler(ws: WebSocket, call_id: str):
                 await speak(rid, rep)
                 continue
 
-            # 🧩 CALENDAR LOGIC
+            # 🧩 CALENDAR HANDLING
             if any(k in lower_msg for k in calendar_kw):
                 await speak(rid, random.choice(calendar_phrases), end=False)
                 rep = await send_to_n8n(N8N_CALENDAR_URL, msg)
                 await speak(rid, rep)
                 continue
 
-            # 🧠 Default LLM Response
+            # 🧠 Default AI Chat Response
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -306,7 +314,14 @@ async def ws_handler(ws: WebSocket, call_id: str):
     except WebSocketDisconnect:
         log.info(f"❌ Disconnected {call_id}")
     finally:
-        connections.pop(call_id, None)
+        if call_id in connections:
+            connections[call_id]["active"] = False
+            connections.pop(call_id, None)
+        try:
+            await ws.close()
+        except Exception:
+            pass
+        log.info("🧹 Cleaned up connection completely.")
 
 # =====================================================
 # 🚀 RUN

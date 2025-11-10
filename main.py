@@ -170,7 +170,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — natural transitions + text debounce
+# 🔌 RETELL WS — smart context phrases + debounce
 # =====================================================
 connections = {}
 
@@ -203,15 +203,24 @@ async def ws_handler(ws: WebSocket, call_id: str):
 
     last_msg = {"t": None, "time": 0}
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
-    plate_kw = ["plate", "add", "to-do", "task", "notion"]
+    plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
 
-    plate_phrases = [
+    plate_add_kw = ["add", "put", "create", "new", "include"]
+    plate_check_kw = ["what", "show", "see", "check", "read"]
+
+    # Natural rotating phrases
+    add_phrases = [
         "Alright, let me add that for you...",
-        "Sure thing, give me a moment...",
-        "Got it, I’ll take care of that...",
-        "Okay, putting that on your plate now...",
+        "Sure thing, I’ll take care of adding that...",
+        "Got it, adding that right now...",
+        "Okay, putting that on your list...",
     ]
-
+    check_phrases = [
+        "Let’s see what’s on your plate...",
+        "One moment, checking that for you...",
+        "Alright, here’s what you’ve got...",
+        "Give me a sec, pulling that up...",
+    ]
     calendar_phrases = [
         "Let me check your schedule real quick...",
         "Just a second while I pull that up...",
@@ -250,18 +259,30 @@ async def ws_handler(ws: WebSocket, call_id: str):
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
 
-            if any(k in msg.lower() for k in plate_kw):
-                await speak(rid, random.choice(plate_phrases), end=False)
+            lower_msg = msg.lower()
+
+            # 🧩 PLATE LOGIC
+            if any(k in lower_msg for k in plate_kw):
+                # decide if adding or checking
+                if any(k in lower_msg for k in plate_add_kw):
+                    phrase = random.choice(add_phrases)
+                elif any(k in lower_msg for k in plate_check_kw):
+                    phrase = random.choice(check_phrases)
+                else:
+                    phrase = "Let me handle that..."
+                await speak(rid, phrase, end=False)
                 rep = await send_to_n8n(N8N_PLATE_URL, msg)
                 await speak(rid, rep)
                 continue
 
-            if any(k in msg.lower() for k in calendar_kw):
+            # 🧩 CALENDAR LOGIC
+            if any(k in lower_msg for k in calendar_kw):
                 await speak(rid, random.choice(calendar_phrases), end=False)
                 rep = await send_to_n8n(N8N_CALENDAR_URL, msg)
                 await speak(rid, rep)
                 continue
 
+            # 🧠 Default LLM Response
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,

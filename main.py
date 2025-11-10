@@ -3,11 +3,12 @@ import json
 import logging
 import asyncio
 import time
+import random
 from typing import List, Dict
 from dotenv import load_dotenv
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from openai import AsyncOpenAI
@@ -126,7 +127,7 @@ async def get_notion_prompt():
         return "You are Solomon Roth’s AI assistant, Silas."
 
 # =====================================================
-# 🔹 /prompt ENDPOINT FOR ADMIN PANEL
+# 🔹 /prompt ENDPOINT
 # =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt_text():
@@ -169,19 +170,18 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS (Text-based debounce)
+# 🔌 RETELL WS — natural transitions + text debounce
 # =====================================================
 connections = {}
 
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
-    # Close any existing call_id connection
+    # Close any old connection with same call_id
     if call_id in connections:
         try:
             await connections[call_id]["ws"].close()
         except Exception:
             pass
-
     connections[call_id] = {"ws": ws}
     await ws.accept()
     user_id = "solomon_roth"
@@ -204,6 +204,20 @@ async def ws_handler(ws: WebSocket, call_id: str):
     last_msg = {"t": None, "time": 0}
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion"]
+
+    plate_phrases = [
+        "Alright, let me add that for you...",
+        "Sure thing, give me a moment...",
+        "Got it, I’ll take care of that...",
+        "Okay, putting that on your plate now...",
+    ]
+
+    calendar_phrases = [
+        "Let me check your schedule real quick...",
+        "Just a second while I pull that up...",
+        "Alright, let’s take a look at your calendar...",
+        "Okay, seeing what’s on your agenda...",
+    ]
 
     try:
         while True:
@@ -237,13 +251,13 @@ async def ws_handler(ws: WebSocket, call_id: str):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
 
             if any(k in msg.lower() for k in plate_kw):
-                await speak(rid, "On it...", end=False)
+                await speak(rid, random.choice(plate_phrases), end=False)
                 rep = await send_to_n8n(N8N_PLATE_URL, msg)
                 await speak(rid, rep)
                 continue
 
             if any(k in msg.lower() for k in calendar_kw):
-                await speak(rid, "Checking your schedule...", end=False)
+                await speak(rid, random.choice(calendar_phrases), end=False)
                 rep = await send_to_n8n(N8N_CALENDAR_URL, msg)
                 await speak(rid, rep)
                 continue

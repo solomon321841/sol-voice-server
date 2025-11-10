@@ -2,126 +2,109 @@ import os
 import json
 import logging
 import asyncio
+import time
 from typing import List, Dict
 from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from pyngrok import ngrok
-import time  # added for debounce timing
+from openai import AsyncOpenAI
 
-# ============ Logging ============
+# =====================================================
+# 🔧 LOGGING
+# =====================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("main")
 
-# ============ Env ============
+# =====================================================
+# 🔑 ENV
+# =====================================================
 load_dotenv()
-CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
-NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "29b20888d7678028ad4fc54ee3f18539").strip()
+NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "").strip()
 
-# ============ n8n Webhooks ============
+# =====================================================
+# 🌐 n8n ENDPOINTS
+# =====================================================
 N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
 N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
-# ============ FastAPI ============
+# =====================================================
+# 🤖 MODEL
+# =====================================================
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+GPT_MODEL = "gpt-4o-mini"
+
+# =====================================================
+# ⚙️ FASTAPI APP
+# =====================================================
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
 )
 
+@app.get("/")
+async def home():
+    """Default route just confirms backend is live."""
+    return {"status": "running", "message": "Silas backend is online."}
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
-
-@app.post("/")
-async def webhook_sink(request: Request):
-    try:
-        _ = await request.body()
-    except Exception:
-        pass
-    return JSONResponse({"ok": True})
+    return {"ok": True}
 
 # =====================================================
-# 🧠 MEM0 FUNCTIONS
+# 🧠 MEM0 MEMORY
 # =====================================================
-async def mem0_search_v2(user_id: str, query: str):
+async def mem0_search(user_id: str, query: str):
     if not MEMO_API_KEY:
         return []
-    url = "https://api.mem0.ai/v2/memories/"
     headers = {"Authorization": f"Token {MEMO_API_KEY}"}
     payload = {"filters": {"user_id": user_id}, "query": query}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(url, headers=headers, json=payload)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list):
-                log.info(f"🧠 Found {len(data)} memories for {user_id}")
-                return data
-        else:
-            log.warning(f"⚠️ Mem0 v2 search failed ({r.status_code}): {r.text}")
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post("https://api.mem0.ai/v2/memories/", headers=headers, json=payload)
+            if r.status_code == 200:
+                return r.json() if isinstance(r.json(), list) else []
     except Exception as e:
-        log.error(f"🔥 Mem0 v2 search error: {e}")
+        log.error(f"MEM0 search error: {e}")
     return []
 
-async def mem0_add_v1(user_id: str, text: str):
+async def mem0_add(user_id: str, text: str):
     if not MEMO_API_KEY or not text:
         return
-    url = "https://api.mem0.ai/v1/memories/"
     headers = {"Authorization": f"Token {MEMO_API_KEY}"}
     payload = {"user_id": user_id, "messages": [{"role": "user", "content": text}]}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(url, headers=headers, json=payload)
-        if r.status_code == 200:
-            log.info(f"✅ Memory added for {user_id}")
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post("https://api.mem0.ai/v1/memories/", headers=headers, json=payload)
     except Exception as e:
-        log.error(f"🔥 Error adding memory to Mem0: {e}")
+        log.error(f"MEM0 add error: {e}")
 
-def build_memory_context(items: list) -> str:
-    if not items:
+def memory_context(memories: list) -> str:
+    if not memories:
         return ""
     lines = []
-    for it in items:
-        if isinstance(it, dict):
-            content = it.get("memory") or it.get("content") or it.get("text")
-            if content:
-                lines.append(f"- {content}")
-    if not lines:
-        return ""
-    return "Relevant memories (use only if helpful):\n" + "\n".join(lines)
+    for m in memories:
+        if isinstance(m, dict):
+            txt = m.get("memory") or m.get("content") or m.get("text")
+            if txt:
+                lines.append(f"- {txt}")
+    return "Relevant memories:\n" + "\n".join(lines)
 
 # =====================================================
-# ⚙️ CEREBRAS CHAT
+# 🧩 NOTION PROMPT
 # =====================================================
-CEREBRAS_MODEL = "llama3.1-8b"
-
-async def cerebras_chat(messages: List[Dict[str, str]]) -> str:
-    if not CEREBRAS_API_KEY:
-        return "Cerebras key missing."
-    headers = {"Authorization": f"Bearer {CEREBRAS_API_KEY}", "Content-Type": "application/json"}
-    data = {"model": CEREBRAS_MODEL, "messages": messages, "max_tokens": 300, "temperature": 0.7}
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post("https://api.cerebras.ai/v1/chat/completions", headers=headers, json=data)
-            r.raise_for_status()
-            res = r.json()
-            return res["choices"][0]["message"]["content"]
-    except Exception as e:
-        log.error(f"LLM Error: {e}")
-        return "Sorry, I hit a speed bump. Try again?"
-
-# =====================================================
-# 🧩 FETCH PROMPT LIVE FROM NOTION
-# =====================================================
-async def get_latest_prompt():
+async def get_notion_prompt():
+    if not NOTION_PAGE_ID or not NOTION_API_KEY:
+        return "You are Solomon Roth’s personal AI assistant, Silas."
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
@@ -129,187 +112,166 @@ async def get_latest_prompt():
         "Content-Type": "application/json"
     }
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(url, headers=headers)
-            res.raise_for_status()
-            data = res.json()
-            text_parts = []
-            for block in data.get("results", []):
-                if block.get("type") == "paragraph":
-                    text = "".join(
-                        [r.get("plain_text", "") for r in block["paragraph"].get("rich_text", [])]
-                    )
-                    text_parts.append(text)
-            prompt_text = "\n".join(text_parts).strip()
-            return prompt_text or "You are Solomon Roth’s personal AI assistant."
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(url, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            parts = []
+            for blk in data.get("results", []):
+                if blk.get("type") == "paragraph":
+                    txt = "".join([r.get("plain_text", "") for r in blk["paragraph"].get("rich_text", [])])
+                    parts.append(txt)
+            return "\n".join(parts).strip() or "You are Solomon Roth’s AI assistant, Silas."
     except Exception as e:
-        log.error(f"❌ Error fetching prompt from Notion: {e}")
-        return "You are Solomon Roth’s personal AI assistant."
+        log.error(f"❌ Notion error: {e}")
+        return "You are Solomon Roth’s AI assistant, Silas."
 
 # =====================================================
-# 🧩 N8N HELPERS
+# 🔹 /prompt ENDPOINT FOR ADMIN PANEL
 # =====================================================
-async def send_to_n8n_calendar(user_message: str) -> str:
+@app.get("/prompt", response_class=PlainTextResponse)
+async def get_prompt_text():
+    """Serves live prompt text to admin panel."""
+    text = await get_notion_prompt()
+    headers = {"Access-Control-Allow-Origin": "*"}
+    return PlainTextResponse(text, headers=headers)
+
+# =====================================================
+# 🧩 n8n HELPERS (with improved readable logic)
+# =====================================================
+async def send_to_n8n(url: str, message: str) -> str:
+    """Send message to n8n webhook and return a clean, readable reply."""
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            payload = {"message": user_message}
-            response = await client.post(N8N_CALENDAR_URL, json=payload)
-            log.info(f"📩 n8n calendar response: {response.text}")
-            if response.status_code == 200:
-                return response.text.strip()
-            else:
-                log.warning(f"⚠️ n8n calendar returned {response.status_code}: {response.text}")
-    except Exception as e:
-        log.error(f"❌ Error sending to n8n calendar: {e}")
-    return "Sorry, I couldn’t reach your calendar right now."
+        async with httpx.AsyncClient(timeout=20) as c:
+            payload = {"message": message}
+            r = await c.post(url, json=payload)
+            log.info(f"📩 n8n raw response ({url}): {r.text}")
 
-# =====================================================
-# 🧩 PLATE (NOTION) WORKFLOW
-# =====================================================
-async def send_to_plate(user_message: str) -> str:
-    """Send user message to Notion Plate workflow and return clean reply."""
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            payload = {"message": user_message}
-            response = await client.post(N8N_PLATE_URL, json=payload)
-            log.info(f"🍽️ Plate response: {response.text}")
-
-            if response.status_code == 200:
+            if r.status_code == 200:
+                # Try parsing JSON first
                 try:
-                    data = response.json()
+                    data = r.json()
                     if isinstance(data, dict):
-                        reply_text = (
+                        return (
                             data.get("reply")
                             or data.get("message")
                             or data.get("text")
                             or data.get("output")
-                        )
-                        if reply_text:
-                            return str(reply_text).strip()
-                        return json.dumps(data, indent=2)
+                            or json.dumps(data, indent=2)
+                        ).strip()
                     elif isinstance(data, list):
-                        return " ".join(str(x) for x in data)
+                        joined = " ".join(str(x) for x in data)
+                        return joined.strip()
                     else:
                         return str(data).strip()
                 except Exception:
-                    return response.text.strip()
+                    return r.text.strip()
             else:
-                log.warning(f"⚠️ Plate returned {response.status_code}: {response.text}")
+                log.warning(f"⚠️ n8n returned {r.status_code}: {r.text}")
+                return "Sorry, the automation returned an unexpected response."
     except Exception as e:
-        log.error(f"❌ Error sending to plate workflow: {e}")
-    return "Sorry, I couldn’t reach your plate right now."
+        log.error(f"n8n error: {e}")
+        return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL CONNECTION
+# 🔌 RETELL WS
 # =====================================================
+connections = {}
+
 @app.websocket("/ws/{call_id}")
-async def websocket_endpoint(websocket: WebSocket, call_id: str):
-    await websocket.accept()
-    log.info(f"🔌 Retell WebSocket connected: {call_id}")
+async def ws_handler(ws: WebSocket, call_id: str):
+    if call_id in connections:
+        try:
+            await connections[call_id].close()
+        except Exception:
+            pass
+    connections[call_id] = ws
+    await ws.accept()
     user_id = "solomon_roth"
 
-    async def send_speech(response_id: int, text: str, end_turn: bool = True):
+    async def speak(resp_id, text, end=True):
         payload = {
             "type": "response_message",
-            "response_id": response_id,
+            "response_id": resp_id,
             "content": text,
-            "content_complete": True,
-            "end_turn": end_turn,
+            "content_complete": end,
+            "end_turn": end
         }
-        await websocket.send_text(json.dumps(payload))
-        log.info(f"🗣️ Sent speech response: {text[:100]}")
+        await ws.send_text(json.dumps(payload))
+        log.info(f"🗣️ {text[:80]}")
 
-    await send_speech(0, "Hello Solomon, I’m ready. What can I do for you today?")
+    prompt = await get_notion_prompt()
+    greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
+    await speak(0, greet)
 
-    calendar_keywords = ["schedule", "meeting", "calendar", "cancel", "event", "appointment", "reschedule"]
-    plate_keywords = [
-        "plate", "add", "task", "to-do", "notion", "on my plate",
-        "remove from plate", "what’s on my plate", "add to my plate",
-        "put on my plate", "add to tasks", "add to my list"
-    ]
-
-    last_message = {"text": None, "time": 0}
+    last_msg = {"t": None, "time": 0}
+    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
+    plate_kw = ["plate", "add", "to-do", "task", "notion"]
 
     try:
         while True:
-            raw = await websocket.receive_text()
-            try:
-                data = json.loads(raw)
-            except Exception:
-                continue
+            raw = await ws.receive_text()
+            data = json.loads(raw)
+            trans = data.get("transcript", [])
+            inter = data.get("interaction_type")
+            rid = int(data.get("response_id", 1))
+            msg = ""
+            for t in reversed(trans or []):
+                if t.get("role") == "user":
+                    msg = t.get("content", "").strip()
+                    break
 
-            transcript = data.get("transcript", [])
-            interaction_type = data.get("interaction_type")
-            response_id = int(data.get("response_id", 1))
-            user_message = ""
-            if transcript and isinstance(transcript, list):
-                for t in reversed(transcript):
-                    if t.get("role") == "user":
-                        user_message = t.get("content", "").strip()
-                        break
+            if inter == "response_required" and msg:
+                now = time.time()
+                if msg == last_msg["t"] and now - last_msg["time"] < 3:
+                    continue
+                last_msg = {"t": msg, "time": now}
 
-            if interaction_type == "response_required":
-                # 🛑 Prevent duplicate or partial Retell responses
-                if user_message:
-                    now = time.time()
-                    same = user_message.strip().lower() == (last_message["text"] or "").strip().lower()
-                    subset = (
-                        user_message.strip().lower().startswith((last_message["text"] or "").strip().lower())
-                        or (last_message["text"] or "").strip().lower().startswith(user_message.strip().lower())
+                mems = await mem0_search(user_id, msg)
+                ctx = memory_context(mems)
+                sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
+
+                if any(k in msg.lower() for k in plate_kw):
+                    await speak(rid, "On it...", end=False)
+                    rep = await send_to_n8n(N8N_PLATE_URL, msg)
+                    await speak(rid, rep)
+                    continue
+
+                if any(k in msg.lower() for k in calendar_kw):
+                    await speak(rid, "Checking your schedule...", end=False)
+                    rep = await send_to_n8n(N8N_CALENDAR_URL, msg)
+                    await speak(rid, rep)
+                    continue
+
+                try:
+                    stream = await openai_client.chat.completions.create(
+                        model=GPT_MODEL,
+                        messages=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": msg}
+                        ],
+                        max_tokens=150,
+                        temperature=0.7,
+                        stream=True,
                     )
-                    if (same or subset) and now - last_message["time"] < 3:
-                        log.info("🛑 Skipping duplicate/partial message to prevent double voice.")
-                        continue
-                    last_message = {"text": user_message, "time": now}
-
-                mem_items = await mem0_search_v2(user_id, user_message or "")
-                context = build_memory_context(mem_items)
-                notion_prompt = await get_latest_prompt()
-
-                if any(kw in user_message.lower() for kw in plate_keywords):
-                    log.info(f"🍽️ Routing to plate workflow: {user_message}")
-                    reply = await send_to_plate(user_message)
-                    await send_speech(response_id, reply)
-                    continue
-
-                if any(kw in user_message.lower() for kw in calendar_keywords):
-                    log.info(f"📅 Routing to calendar workflow: {user_message}")
-                    reply = await send_to_n8n_calendar(user_message)
-                    await send_speech(response_id, reply)
-                    continue
-
-                system_prompt = (
-                    f"{notion_prompt}\n\n"
-                    "The following are true remembered facts about Solomon. "
-                    "Do not say you don't know them if they're listed below.\n"
-                    f"{context}\n"
-                )
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message or "Hello?"},
-                ]
-                reply = await cerebras_chat(messages)
-                await send_speech(response_id, reply)
-                if user_message:
-                    asyncio.create_task(mem0_add_v1(user_id, user_message))
-
+                    async for chunk in stream:
+                        delta = getattr(chunk.choices[0].delta, "content", None)
+                        if delta:
+                            await speak(rid, delta, end=False)
+                    await speak(rid, "", end=True)
+                    asyncio.create_task(mem0_add(user_id, msg))
+                except Exception as e:
+                    log.error(f"LLM stream error: {e}")
+                    await speak(rid, "Sorry, I hit a small issue.")
     except WebSocketDisconnect:
-        log.info(f"❌ Retell WebSocket disconnected: {call_id}")
-    except Exception as e:
-        log.error(f"WebSocket error: {e}")
+        log.info(f"❌ Disconnected {call_id}")
+    finally:
+        connections.pop(call_id, None)
 
 # =====================================================
-# 🚀 SERVER STARTUP
+# 🚀 RUN
 # =====================================================
-def start_ngrok(port: int = 8000) -> str:
-    tunnel = ngrok.connect(addr=port, proto="http")
-    url = tunnel.public_url.replace("http://", "https://")
-    log.info(f"🌐 Public URL: {url}")
-    log.info(f"🔗 Retell Custom LLM URL (paste this): wss://{url.replace('https://', '')}/ws/{{call_id}}")
-    return url
-
 if __name__ == "__main__":
-    start_ngrok(8000)
-    log.info("🚀 Running FastAPI server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 

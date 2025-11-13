@@ -184,6 +184,19 @@ def _normalize_message(msg: str) -> str:
     msg = " ".join(msg.split())
     return msg
 
+def _is_similar(a: str, b: str) -> bool:
+    """
+    Treat messages as the same intent if they are equal OR
+    one is basically a prefix/extension of the other.
+    Example:
+      a = "add buy groceries"
+      b = "add buy groceries to my plate for sunday"
+    -> similar
+    """
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a)
+
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
     # 🧩 Always close any previous active connection to prevent double voice
@@ -269,14 +282,16 @@ async def ws_handler(ws: WebSocket, call_id: str):
             if not (inter == "response_required" and msg):
                 continue
 
-            # 🔹 Strong debouncing: ignore near-identical repeats within 5 seconds
+            # 🔹 Strong debouncing: ignore near-identical / prefix repeats within 5 seconds
             norm = _normalize_message(msg)
             now = time.time()
             # drop old entries
             recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 5]
-            if any(m == norm for (m, ts) in recent_msgs):
-                log.info(f"🛑 Skipping debounced duplicate message: {msg}")
+
+            if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
+                log.info(f"🛑 Skipping debounced *similar* message: {msg}")
                 continue
+
             recent_msgs.append((norm, now))
 
             mems = await mem0_search(user_id, msg)

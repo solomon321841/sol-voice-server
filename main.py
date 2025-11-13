@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — OPTION 3 DUPLICATE + FINAL MESSAGE FIX
+# 🔌 RETELL WS — FIXED (NO DUPLICATES, NO PARTIALS)
 # =====================================================
 connections = {}
 
@@ -186,7 +186,7 @@ def _is_similar(a: str, b: str):
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
 
-    # 🧩 CLEAN OUT ALL OTHER CONNECTIONS BEFORE ACCEPTING NEW ONE
+    # Clean other connections
     for cid, conn in list(connections.items()):
         try:
             conn["active"] = False
@@ -199,9 +199,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
     connections[call_id] = {"ws": ws, "active": True}
     user_id = "solomon_roth"
 
-    # =============================
-    # RESPONSE SPEAK FUNCTION
-    # =============================
     async def speak(resp_id, text, end=True):
         if not connections.get(call_id, {}).get("active"):
             return
@@ -217,26 +214,22 @@ async def ws_handler(ws: WebSocket, call_id: str):
         except:
             pass
 
-    # GREETING
+    # Greeting
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await speak(0, greet)
 
-    # =============================
-    # DEBOUNCE + FINAL MESSAGE STATE
-    # =============================
     last_transcript = ""
     last_update_time = time.time()
-    silence_threshold = 0.6  # <== 600ms
+    silence_threshold = 0.6  # 600ms
+
     recent_msgs = []
 
-    # =============================
-    # KEYWORD TRIGGERS
-    # =============================
+    # Keywords
+    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
     plate_check_kw = ["what", "show", "see", "check", "read"]
-    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
 
     add_phrases = [
         "Of course boss. Doing that now.",
@@ -258,64 +251,51 @@ async def ws_handler(ws: WebSocket, call_id: str):
         "Okay, seeing what’s on your agenda...",
     ]
 
-    # =====================================================
-    # MAIN LOOP WITH OPTION 3 LOGIC
-    # =====================================================
     try:
         while True:
             raw = await ws.receive_text()
 
-            # If already disconnected
             if not connections.get(call_id, {}).get("active"):
                 break
 
             data = json.loads(raw)
             trans = data.get("transcript", [])
-            inter = data.get("interaction_type")  # "response_required"
+            inter = data.get("interaction_type")
             rid = data.get("response_id", 1)
 
-            # Extract newest user message
             latest_user = ""
             for t in reversed(trans or []):
                 if t.get("role") == "user":
                     latest_user = t.get("content", "")
                     break
 
-            # Ignore empty or non-required interactions
             if not latest_user or inter != "response_required":
                 continue
 
-            # Update tracking for "is conversation still happening?"
+            # Update last transcript & timer
             if latest_user != last_transcript:
                 last_transcript = latest_user
                 last_update_time = time.time()
-                continue  # Wait until user stops talking
-
-            # Check silence for 600ms
+            # Wait for silence
             if time.time() - last_update_time < silence_threshold:
                 continue
 
-            # FINAL STABLE MESSAGE
             msg = latest_user.strip()
             norm = _normalize(msg)
 
-            # Prevent duplicate sends
+            # Debounce duplicates
             now = time.time()
             recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 5]
             if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
                 continue
             recent_msgs.append((norm, now))
 
-            # MEMORY CONTEXT
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
-
             lower_msg = msg.lower()
 
-            # ===============================
-            # PLATE REQUEST
-            # ===============================
+            # PLATE
             if any(k in lower_msg for k in plate_kw):
                 if any(k in lower_msg for k in plate_add_kw):
                     phrase = random.choice(add_phrases)
@@ -323,24 +303,19 @@ async def ws_handler(ws: WebSocket, call_id: str):
                     phrase = random.choice(check_phrases)
                 else:
                     phrase = "Let me handle that..."
-
                 await speak(rid, phrase, end=False)
                 reply = await send_to_n8n(N8N_PLATE_URL, msg)
                 await speak(rid, reply)
                 continue
 
-            # ===============================
-            # CALENDAR REQUEST
-            # ===============================
+            # CALENDAR
             if any(k in lower_msg for k in calendar_kw):
                 await speak(rid, random.choice(calendar_phrases), end=False)
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
                 await speak(rid, reply)
                 continue
 
-            # ===============================
-            # NORMAL CHAT
-            # ===============================
+            # DEFAULT CHAT
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -354,7 +329,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
                     delta = getattr(chunk.choices[0].delta, "content", None)
                     if delta:
                         await speak(rid, delta, end=False)
-
                 await speak(rid, "", end=True)
                 asyncio.create_task(mem0_add(user_id, msg))
 
@@ -366,7 +340,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
         log.info(f"❌ Retell disconnected {call_id}")
 
     finally:
-        # HARD KILL: ensure NO further messages processed
         if call_id in connections:
             connections[call_id]["active"] = False
             try:

@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — FIXED (NO DUPLICATES, NO PARTIALS)
+# 🔌 RETELL WS — FIX: IMMEDIATELY STOP LISTENING AFTER DISCONNECT
 # =====================================================
 connections = {}
 
@@ -179,14 +179,27 @@ def _normalize(msg: str):
     return msg
 
 def _is_similar(a: str, b: str):
+    """
+    Stronger similarity:
+    - exact match
+    - one starts with the other
+    - one is contained inside the other
+    This helps catch partial vs full versions of the same phrase.
+    """
     if not a or not b:
         return False
-    return a == b or a.startswith(b) or b.startswith(a)
+    if a == b:
+        return True
+    if a.startswith(b) or b.startswith(a):
+        return True
+    if a in b or b in a:
+        return True
+    return False
 
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
 
-    # Clean other connections
+    # 🧩 CLEAN OUT ALL OTHER CONNECTIONS BEFORE ACCEPTING NEW ONE
     for cid, conn in list(connections.items()):
         try:
             conn["active"] = False
@@ -219,10 +232,7 @@ async def ws_handler(ws: WebSocket, call_id: str):
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await speak(0, greet)
 
-    last_transcript = ""
-    last_update_time = time.time()
-    silence_threshold = 0.6  # 600ms
-
+    # Debounce tracking
     recent_msgs = []
 
     # Keywords
@@ -255,6 +265,7 @@ async def ws_handler(ws: WebSocket, call_id: str):
         while True:
             raw = await ws.receive_text()
 
+            # If already disconnected → stop immediately
             if not connections.get(call_id, {}).get("active"):
                 break
 
@@ -263,33 +274,26 @@ async def ws_handler(ws: WebSocket, call_id: str):
             inter = data.get("interaction_type")
             rid = data.get("response_id", 1)
 
-            latest_user = ""
+            msg = ""
             for t in reversed(trans or []):
                 if t.get("role") == "user":
-                    latest_user = t.get("content", "")
+                    msg = t.get("content", "")
                     break
 
-            if not latest_user or inter != "response_required":
+            if not msg or inter != "response_required":
                 continue
 
-            # Update last transcript & timer
-            if latest_user != last_transcript:
-                last_transcript = latest_user
-                last_update_time = time.time()
-            # Wait for silence
-            if time.time() - last_update_time < silence_threshold:
-                continue
-
-            msg = latest_user.strip()
+            # DEBOUNCE — prevent double n8n requests in a short window
             norm = _normalize(msg)
-
-            # Debounce duplicates
             now = time.time()
-            recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 5]
+            # only keep messages from last 2 seconds
+            recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 2]
             if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
+                log.info(f"🛑 Skipping duplicate / partial-like message: {msg}")
                 continue
             recent_msgs.append((norm, now))
 
+            # Memory
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
@@ -340,6 +344,7 @@ async def ws_handler(ws: WebSocket, call_id: str):
         log.info(f"❌ Retell disconnected {call_id}")
 
     finally:
+        # HARD KILL: ensure NO further messages processed
         if call_id in connections:
             connections[call_id]["active"] = False
             try:

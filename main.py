@@ -9,7 +9,7 @@ from typing import List, Dict
 from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from openai import AsyncOpenAI
@@ -127,13 +127,62 @@ async def get_notion_prompt():
         return "You are Solomon Roth’s AI assistant, Silas."
 
 # =====================================================
-# 🔹 /prompt ENDPOINT
+# 🔹 /prompt ENDPOINT (READ)
 # =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt_text():
     text = await get_notion_prompt()
     headers = {"Access-Control-Allow-Origin": "*"}
     return PlainTextResponse(text, headers=headers)
+
+# =====================================================
+# 🔹 NEW — Admin Panel: /get_prompt_live (JSON)
+# =====================================================
+@app.get("/get_prompt_live")
+async def get_prompt_live():
+    text = await get_notion_prompt()
+    return {"prompt_text": text}
+
+# =====================================================
+# 🔹 NEW — Admin Panel: /update_prompt_live (WRITE TO NOTION)
+# =====================================================
+@app.post("/update_prompt_live")
+async def update_prompt_live(body: dict):
+    new_prompt = body.get("prompt_text", "").strip()
+    if not new_prompt:
+        return {"success": False, "error": "Prompt empty"}
+
+    # Rewrite entire Notion page’s content
+    try:
+        url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
+        headers = {
+            "Authorization": f"Bearer {NOTION_API_KEY}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "children": [
+                {
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {"type": "text", "text": {"content": new_prompt}}
+                        ]
+                    }
+                }
+            ]
+        }
+
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.patch(url, headers=headers, json=payload)
+
+        return {"success": True}
+
+    except Exception as e:
+        log.error(f"❌ Notion write error: {e}")
+        return {"success": False}
 
 # =====================================================
 # 🧩 n8n HELPERS
@@ -179,13 +228,6 @@ def _normalize(msg: str):
     return msg
 
 def _is_similar(a: str, b: str):
-    """
-    Stronger similarity:
-    - exact match
-    - one starts with the other
-    - one is contained inside the other
-    This helps catch partial vs full versions of the same phrase.
-    """
     if not a or not b:
         return False
     if a == b:
@@ -265,7 +307,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
         while True:
             raw = await ws.receive_text()
 
-            # If already disconnected → stop immediately
             if not connections.get(call_id, {}).get("active"):
                 break
 
@@ -283,23 +324,19 @@ async def ws_handler(ws: WebSocket, call_id: str):
             if not msg or inter != "response_required":
                 continue
 
-            # DEBOUNCE — prevent double n8n requests in a short window
             norm = _normalize(msg)
             now = time.time()
-            # only keep messages from last 2 seconds
             recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 2]
             if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
                 log.info(f"🛑 Skipping duplicate / partial-like message: {msg}")
                 continue
             recent_msgs.append((norm, now))
 
-            # Memory
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower_msg = msg.lower()
 
-            # PLATE
             if any(k in lower_msg for k in plate_kw):
                 if any(k in lower_msg for k in plate_add_kw):
                     phrase = random.choice(add_phrases)
@@ -312,14 +349,12 @@ async def ws_handler(ws: WebSocket, call_id: str):
                 await speak(rid, reply)
                 continue
 
-            # CALENDAR
             if any(k in lower_msg for k in calendar_kw):
                 await speak(rid, random.choice(calendar_phrases), end=False)
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
                 await speak(rid, reply)
                 continue
 
-            # DEFAULT CHAT
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -344,7 +379,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
         log.info(f"❌ Retell disconnected {call_id}")
 
     finally:
-        # HARD KILL: ensure NO further messages processed
         if call_id in connections:
             connections[call_id]["active"] = False
             try:

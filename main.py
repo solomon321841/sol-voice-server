@@ -171,7 +171,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — Single Voice Connection + Strong Debounce
+# 🔌 RETELL WS — Single Voice Connection + Strong Debounce + Inactivity Timeout
 # =====================================================
 connections = {}
 
@@ -197,6 +197,8 @@ def _is_similar(a: str, b: str) -> bool:
         return False
     return a == b or a.startswith(b) or b.startswith(a)
 
+INACTIVITY_TIMEOUT_SECONDS = 2.0  # ~2s after last activity → force close
+
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
     # 🧩 Always close any previous active connection to prevent double voice
@@ -213,7 +215,11 @@ async def ws_handler(ws: WebSocket, call_id: str):
     await ws.accept()
     user_id = "solomon_roth"
 
+    # Track last activity time for inactivity timeout
+    last_activity = time.time()
+
     async def speak(resp_id, text, end=True):
+        nonlocal last_activity
         if not connections.get(call_id, {}).get("active"):
             return
         payload = {
@@ -225,9 +231,32 @@ async def ws_handler(ws: WebSocket, call_id: str):
         }
         try:
             await ws.send_text(json.dumps(payload))
+            last_activity = time.time()
             log.info(f"🗣️ {text[:80]}")
         except Exception:
             log.warning("Attempted to speak after disconnect — ignored.")
+
+    # 🔍 Inactivity watchdog
+    async def inactivity_watchdog():
+        nonlocal last_activity
+        try:
+            while connections.get(call_id, {}).get("active"):
+                await asyncio.sleep(0.5)
+                if time.time() - last_activity > INACTIVITY_TIMEOUT_SECONDS:
+                    log.info(f"⏹️ Inactivity timeout reached for {call_id}, closing WebSocket.")
+                    # Mark inactive first so loops stop
+                    if call_id in connections:
+                        connections[call_id]["active"] = False
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+                    break
+        except Exception as e:
+            log.error(f"Watchdog error for {call_id}: {e}")
+
+    # Start watchdog
+    asyncio.create_task(inactivity_watchdog())
 
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
@@ -267,6 +296,7 @@ async def ws_handler(ws: WebSocket, call_id: str):
     try:
         while True:
             raw = await ws.receive_text()
+            last_activity = time.time()
             if not connections.get(call_id, {}).get("active"):
                 break
 

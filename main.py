@@ -4,6 +4,7 @@ import logging
 import asyncio
 import time
 import random
+import string
 from typing import List, Dict
 from dotenv import load_dotenv
 import httpx
@@ -170,9 +171,18 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — Single Voice Connection Fix
+# 🔌 RETELL WS — Single Voice Connection + Strong Debounce
 # =====================================================
 connections = {}
+
+def _normalize_message(msg: str) -> str:
+    """Normalize text so tiny differences don't cause duplicate sends."""
+    msg = msg.lower().strip()
+    # Remove punctuation so "hello." and "hello" look the same
+    msg = "".join(ch for ch in msg if ch not in string.punctuation)
+    # Collapse whitespace
+    msg = " ".join(msg.split())
+    return msg
 
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
@@ -210,14 +220,16 @@ async def ws_handler(ws: WebSocket, call_id: str):
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await speak(0, greet)
 
-    last_msg = {"t": None, "time": 0}
+    # 🔹 Track recent normalized messages to prevent double n8n calls
+    recent_msgs: list[tuple[str, float]] = []
+
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
 
     plate_add_kw = ["add", "put", "create", "new", "include"]
     plate_check_kw = ["what", "show", "see", "check", "read"]
 
-    # 🔹 UPDATED: Your custom pre-responses for ADD-to-plate
+    # 🔹 Your custom pre-responses for ADD-to-plate
     add_phrases = [
         "Of course boss. Doing that now.",
         "Gotcha. Give me one sec.",
@@ -257,16 +269,15 @@ async def ws_handler(ws: WebSocket, call_id: str):
             if not (inter == "response_required" and msg):
                 continue
 
+            # 🔹 Strong debouncing: ignore near-identical repeats within 5 seconds
+            norm = _normalize_message(msg)
             now = time.time()
-            same = msg.lower() == (last_msg["t"] or "").lower()
-            subset = (
-                msg.lower().startswith((last_msg["t"] or "").lower())
-                or (last_msg["t"] or "").lower().startswith(msg.lower())
-            )
-            if (same or subset) and now - last_msg["time"] < 2:
-                log.info("🛑 Skipping near-duplicate text.")
+            # drop old entries
+            recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 5]
+            if any(m == norm for (m, ts) in recent_msgs):
+                log.info(f"🛑 Skipping debounced duplicate message: {msg}")
                 continue
-            last_msg = {"t": msg, "time": now}
+            recent_msgs.append((norm, now))
 
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)

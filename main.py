@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — FIX: IMMEDIATELY STOP LISTENING AFTER DISCONNECT
+# 🔌 RETELL WS — OPTION 3 DUPLICATE + FINAL MESSAGE FIX
 # =====================================================
 connections = {}
 
@@ -199,6 +199,9 @@ async def ws_handler(ws: WebSocket, call_id: str):
     connections[call_id] = {"ws": ws, "active": True}
     user_id = "solomon_roth"
 
+    # =============================
+    # RESPONSE SPEAK FUNCTION
+    # =============================
     async def speak(resp_id, text, end=True):
         if not connections.get(call_id, {}).get("active"):
             return
@@ -214,19 +217,26 @@ async def ws_handler(ws: WebSocket, call_id: str):
         except:
             pass
 
-    # Greeting
+    # GREETING
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await speak(0, greet)
 
-    # Debounce tracking
+    # =============================
+    # DEBOUNCE + FINAL MESSAGE STATE
+    # =============================
+    last_transcript = ""
+    last_update_time = time.time()
+    silence_threshold = 0.6  # <== 600ms
     recent_msgs = []
 
-    # Keywords
-    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
+    # =============================
+    # KEYWORD TRIGGERS
+    # =============================
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
     plate_check_kw = ["what", "show", "see", "check", "read"]
+    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
 
     add_phrases = [
         "Of course boss. Doing that now.",
@@ -248,44 +258,64 @@ async def ws_handler(ws: WebSocket, call_id: str):
         "Okay, seeing what’s on your agenda...",
     ]
 
+    # =====================================================
+    # MAIN LOOP WITH OPTION 3 LOGIC
+    # =====================================================
     try:
         while True:
             raw = await ws.receive_text()
 
-            # If already disconnected → stop immediately
+            # If already disconnected
             if not connections.get(call_id, {}).get("active"):
                 break
 
             data = json.loads(raw)
             trans = data.get("transcript", [])
-            inter = data.get("interaction_type")
+            inter = data.get("interaction_type")  # "response_required"
             rid = data.get("response_id", 1)
 
-            msg = ""
+            # Extract newest user message
+            latest_user = ""
             for t in reversed(trans or []):
                 if t.get("role") == "user":
-                    msg = t.get("content", "")
+                    latest_user = t.get("content", "")
                     break
 
-            if not msg or inter != "response_required":
+            # Ignore empty or non-required interactions
+            if not latest_user or inter != "response_required":
                 continue
 
-            # DEBOUNCE — prevent double n8n requests
+            # Update tracking for "is conversation still happening?"
+            if latest_user != last_transcript:
+                last_transcript = latest_user
+                last_update_time = time.time()
+                continue  # Wait until user stops talking
+
+            # Check silence for 600ms
+            if time.time() - last_update_time < silence_threshold:
+                continue
+
+            # FINAL STABLE MESSAGE
+            msg = latest_user.strip()
             norm = _normalize(msg)
+
+            # Prevent duplicate sends
             now = time.time()
             recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 5]
             if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
-                log.info(f"🛑 Skipping duplicate: {msg}")
                 continue
             recent_msgs.append((norm, now))
 
-            # Memory
+            # MEMORY CONTEXT
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
+
             lower_msg = msg.lower()
 
-            # PLATE
+            # ===============================
+            # PLATE REQUEST
+            # ===============================
             if any(k in lower_msg for k in plate_kw):
                 if any(k in lower_msg for k in plate_add_kw):
                     phrase = random.choice(add_phrases)
@@ -293,19 +323,24 @@ async def ws_handler(ws: WebSocket, call_id: str):
                     phrase = random.choice(check_phrases)
                 else:
                     phrase = "Let me handle that..."
+
                 await speak(rid, phrase, end=False)
                 reply = await send_to_n8n(N8N_PLATE_URL, msg)
                 await speak(rid, reply)
                 continue
 
-            # CALENDAR
+            # ===============================
+            # CALENDAR REQUEST
+            # ===============================
             if any(k in lower_msg for k in calendar_kw):
                 await speak(rid, random.choice(calendar_phrases), end=False)
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
                 await speak(rid, reply)
                 continue
 
-            # DEFAULT CHAT
+            # ===============================
+            # NORMAL CHAT
+            # ===============================
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -319,6 +354,7 @@ async def ws_handler(ws: WebSocket, call_id: str):
                     delta = getattr(chunk.choices[0].delta, "content", None)
                     if delta:
                         await speak(rid, delta, end=False)
+
                 await speak(rid, "", end=True)
                 asyncio.create_task(mem0_add(user_id, msg))
 

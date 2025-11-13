@@ -217,12 +217,15 @@ async def ws_handler(ws: WebSocket, call_id: str):
     plate_add_kw = ["add", "put", "create", "new", "include"]
     plate_check_kw = ["what", "show", "see", "check", "read"]
 
+    # 🔹 UPDATED: Your custom pre-responses for ADD-to-plate
     add_phrases = [
-        "Alright, let me add that for you...",
-        "Sure thing, I’ll take care of adding that...",
-        "Got it, adding that right now...",
-        "Okay, putting that on your list...",
+        "Of course boss. Doing that now.",
+        "Gotcha. Give me one sec.",
+        "Of course. Adding that now.",
+        "Okay. Putting that on your plate.",
+        "Not a problem. I’ll be right back.",
     ]
+
     check_phrases = [
         "Let’s see what’s on your plate...",
         "One moment, checking that for you...",
@@ -273,12 +276,16 @@ async def ws_handler(ws: WebSocket, call_id: str):
             # 🧩 PLATE HANDLING
             if any(k in lower_msg for k in plate_kw):
                 if any(k in lower_msg for k in plate_add_kw):
+                    # ADD flow → use your 5 custom "working on it" responses
                     phrase = random.choice(add_phrases)
                 elif any(k in lower_msg for k in plate_check_kw):
+                    # CHECK flow → keep existing "checking" phrases
                     phrase = random.choice(check_phrases)
                 else:
                     phrase = "Let me handle that..."
+                # 1) Immediately say working phrase
                 await speak(rid, phrase, end=False)
+                # 2) Then call n8n and speak its reply (UNCHANGED)
                 rep = await send_to_n8n(N8N_PLATE_URL, msg)
                 await speak(rid, rep)
                 continue

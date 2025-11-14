@@ -168,10 +168,9 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🔌 RETELL WS — Option B Final Buffer (600ms)
+# 🔌 RETELL WS — Connection + Debounce Fix
 # =====================================================
 connections = {}
-FINAL_DELAY = 0.6  # 600ms
 
 def _normalize(msg: str):
     msg = msg.lower().strip()
@@ -179,10 +178,21 @@ def _normalize(msg: str):
     msg = " ".join(msg.split())
     return msg
 
+def _is_similar(a: str, b: str):
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a.startswith(b) or b.startswith(a):
+        return True
+    if a in b or b in a:
+        return True
+    return False
+
 @app.websocket("/ws/{call_id}")
 async def ws_handler(ws: WebSocket, call_id: str):
 
-    # close other connections
+    # CLEAN ALL OTHER CONNECTIONS
     for cid, conn in list(connections.items()):
         try:
             conn["active"] = False
@@ -194,51 +204,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
     await ws.accept()
     connections[call_id] = {"ws": ws, "active": True}
     user_id = "solomon_roth"
-
-    # Final-phrase buffer
-    last_user_text = ""
-    final_message_waiter = None
-
-    async def schedule_final_send(text, rid):
-        await asyncio.sleep(FINAL_DELAY)
-
-        # If another message arrived after scheduling → abort
-        if text != last_user_text:
-            return
-
-        # Now it's final, send it to n8n
-        lower_msg = text.lower()
-
-        # PLATE or CALENDAR routing preserved exactly
-        if any(k in lower_msg for k in ["plate", "add", "to-do", "task", "notion", "list"]):
-            await speak(rid, "Okay, one sec…", end=False)
-            reply = await send_to_n8n(N8N_PLATE_URL, text)
-            await speak(rid, reply)
-            return
-
-        if any(k in lower_msg for k in ["calendar", "meeting", "schedule", "appointment"]):
-            await speak(rid, "Let me check that…", end=False)
-            reply = await send_to_n8n(N8N_CALENDAR_URL, text)
-            await speak(rid, reply)
-            return
-
-        # Default chat
-        try:
-            stream = await openai_client.chat.completions.create(
-                model=GPT_MODEL,
-                messages=[
-                    {"role": "system", "content": await get_notion_prompt()},
-                    {"role": "user", "content": text},
-                ],
-                stream=True,
-            )
-            async for chunk in stream:
-                delta = getattr(chunk.choices[0].delta, "content", None)
-                if delta:
-                    await speak(rid, delta, end=False)
-            await speak(rid, "", end=True)
-        except:
-            await speak(rid, "Sorry, small issue.")
 
     async def speak(resp_id, text, end=True):
         if not connections.get(call_id, {}).get("active"):
@@ -255,14 +220,45 @@ async def ws_handler(ws: WebSocket, call_id: str):
         except:
             pass
 
-    # Greeting
+    # GREETING
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await speak(0, greet)
 
+    # === DEBOUNCE FIX ===
+    recent_msgs = []
+    processed_messages = set()     # <— NEW LINE (only addition #1)
+
+    # Keywords & phrases (unchanged)
+    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
+    plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
+    plate_add_kw = ["add", "put", "create", "new", "include"]
+    plate_check_kw = ["what", "show", "see", "check", "read"]
+
+    add_phrases = [
+        "Of course boss. Doing that now.",
+        "Gotcha. Give me one sec.",
+        "Of course. Adding that now.",
+        "Okay. Putting that on your plate.",
+        "Not a problem. I’ll be right back.",
+    ]
+    check_phrases = [
+        "Let’s see what’s on your plate...",
+        "One moment, checking that for you...",
+        "Alright, here’s what you’ve got...",
+        "Give me a sec, pulling that up...",
+    ]
+    calendar_phrases = [
+        "Let me check your schedule real quick...",
+        "Just a second while I pull that up...",
+        "Alright, let’s take a look at your calendar...",
+        "Okay, seeing what’s on your agenda...",
+    ]
+
     try:
         while True:
             raw = await ws.receive_text()
+
             if not connections.get(call_id, {}).get("active"):
                 break
 
@@ -271,7 +267,6 @@ async def ws_handler(ws: WebSocket, call_id: str):
             inter = data.get("interaction_type")
             rid = data.get("response_id", 1)
 
-            # Pull user text
             msg = ""
             for t in reversed(trans or []):
                 if t.get("role") == "user":
@@ -281,18 +276,73 @@ async def ws_handler(ws: WebSocket, call_id: str):
             if not msg or inter != "response_required":
                 continue
 
-            # Normalize and store
-            last_user_text = msg.strip()
+            # === NORMAL DEBOUNCE ===
+            norm = _normalize(msg)
+            now = time.time()
+            recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 2]
+            if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
+                log.info(f"🛑 Skipping duplicate / partial-like message: {msg}")
+                continue
+            recent_msgs.append((norm, now))
 
-            # Cancel previous pending finalizer
-            if final_message_waiter and not final_message_waiter.done():
-                final_message_waiter.cancel()
+            # MEMORY
+            mems = await mem0_search(user_id, msg)
+            ctx = memory_context(mems)
+            sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
+            lower_msg = msg.lower()
 
-            # Schedule new finalizer
-            final_message_waiter = asyncio.create_task(schedule_final_send(last_user_text, rid))
+            # =========================================================
+            # PLATE — WITH STRONG DUPLICATE BLOCKER (ONLY CHANGE #2)
+            # =========================================================
+            if any(k in lower_msg for k in plate_kw):
+
+                if msg in processed_messages:
+                    log.info(f"🛑 HARD BLOCK duplicate send_to_n8n: {msg}")
+                    continue
+                processed_messages.add(msg)
+
+                if any(k in lower_msg for k in plate_add_kw):
+                    phrase = random.choice(add_phrases)
+                elif any(k in lower_msg for k in plate_check_kw):
+                    phrase = random.choice(check_phrases)
+                else:
+                    phrase = "Let me handle that..."
+
+                await speak(rid, phrase, end=False)
+                reply = await send_to_n8n(N8N_PLATE_URL, msg)
+                await speak(rid, reply)
+                continue
+
+            # CALENDAR
+            if any(k in lower_msg for k in calendar_kw):
+                await speak(rid, random.choice(calendar_phrases), end=False)
+                reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
+                await speak(rid, reply)
+                continue
+
+            # DEFAULT CHAT
+            try:
+                stream = await openai_client.chat.completions.create(
+                    model=GPT_MODEL,
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": msg},
+                    ],
+                    stream=True,
+                )
+                async for chunk in stream:
+                    delta = getattr(chunk.choices[0].delta, "content", None)
+                    if delta:
+                        await speak(rid, delta, end=False)
+                await speak(rid, "", end=True)
+                asyncio.create_task(mem0_add(user_id, msg))
+
+            except Exception as e:
+                log.error(f"LLM error: {e}")
+                await speak(rid, "Sorry, I hit a small issue.")
 
     except WebSocketDisconnect:
-        pass
+        log.info(f"❌ Retell disconnected {call_id}")
 
     finally:
         if call_id in connections:
@@ -302,6 +352,8 @@ async def ws_handler(ws: WebSocket, call_id: str):
             except:
                 pass
             connections.pop(call_id, None)
+
+        log.info(f"🧹 Connection {call_id} fully terminated.")
 
 # =====================================================
 # 🚀 RUN

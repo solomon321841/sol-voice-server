@@ -224,6 +224,7 @@ async def websocket_handler(ws: WebSocket):
         "Okay, seeing what’s on your agenda...",
     ]
 
+    # Greeting
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await ws.send_text(json.dumps({"type": "text", "content": greet}))
@@ -231,10 +232,13 @@ async def websocket_handler(ws: WebSocket):
     try:
         while True:
 
+            # =====================================================
+            # RECEIVE RAW BYTES FROM BROWSER
+            # =====================================================
             data = await ws.receive_bytes()
 
             # =====================================================
-            # 1. STT — FIXED MODEL HERE
+            # STT USING WAV
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
@@ -249,7 +253,7 @@ async def websocket_handler(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))
                 continue
 
-            # Duplicate protection
+            # Debounce
             norm = _normalize(msg)
             now = time.time()
             recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 2]
@@ -263,7 +267,9 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower_msg = msg.lower()
 
-            # Plate Routing
+            # =====================================================
+            # PLATE TASKS
+            # =====================================================
             if any(k in lower_msg for k in plate_kw):
 
                 if msg in processed_messages:
@@ -278,34 +284,38 @@ async def websocket_handler(ws: WebSocket):
                     phrase = "Let me handle that..."
 
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
-                n8n_reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
-                # =====================================================
-                # TTS — NEW MODEL HERE
-                # =====================================================
+                reply = await send_to_n8n(N8N_PLATE_URL, msg)
+
+                # TTS RESPONSE
                 audio = await openai_client.audio.speech.create(
                     model="gpt-4.1-tts",
                     voice="alloy",
-                    input=n8n_reply
+                    input=reply
                 )
                 await ws.send_bytes(audio)
                 continue
 
-            # Calendar
+            # =====================================================
+            # CALENDAR
+            # =====================================================
             if any(k in lower_msg for k in calendar_kw):
                 phrase = random.choice(calendar_phrases)
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
-                cal_reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
+
+                reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
                 audio = await openai_client.audio.speech.create(
                     model="gpt-4.1-tts",
                     voice="alloy",
-                    input=cal_reply
+                    input=reply
                 )
                 await ws.send_bytes(audio)
                 continue
 
+            # =====================================================
             # DEFAULT CHAT
+            # =====================================================
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -338,6 +348,7 @@ async def websocket_handler(ws: WebSocket):
                     )
                     await ws.send_bytes(audio)
 
+                # Save memory
                 asyncio.create_task(mem0_add(user_id, msg))
 
             except Exception as e:
@@ -348,7 +359,7 @@ async def websocket_handler(ws: WebSocket):
         pass
 
 # =====================================================
-# 🚀 RUN
+# 🚀 RUN SERVER
 # =====================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

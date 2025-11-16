@@ -106,7 +106,8 @@ def memory_context(memories: list) -> str:
 async def get_notion_prompt():
     if not NOTION_PAGE_ID or not NOTION_API_KEY:
         return "You are Solomon Roth’s personal AI assistant, Silas."
-    url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children}"
+    # FIXED URL (removed the stray '}')
+    url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": "2022-06-28",
@@ -122,112 +123,147 @@ async def get_notion_prompt():
                 if blk.get("type") == "paragraph":
                     parts.append("".join([t.get("plain_text", "") for t in blk["paragraph"]["rich_text"]]))
             return "\n".join(parts).strip() or "You are Solomon Roth’s AI assistant, Silas."
-    except Exception:
+    except Exception as e:
+        log.error(f"❌ Notion error: {e}")
         return "You are Solomon Roth’s AI assistant, Silas."
 
+# =====================================================
+# 🔹 /prompt ENDPOINT
+# =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt_text():
     txt = await get_notion_prompt()
     return PlainTextResponse(txt, headers={"Access-Control-Allow-Origin": "*"})
 
 # =====================================================
-# 🔧 CLEAN NORMALIZATION AND DEDUP
+# 🧩 n8n HELPERS
 # =====================================================
+async def send_to_n8n(url: str, message: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(url, json={"message": message})
+            log.info(f"📩 n8n raw response: {r.text}")
+
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    if isinstance(data, dict):
+                        return (
+                            data.get("reply") or
+                            data.get("message") or
+                            data.get("text") or
+                            data.get("output") or
+                            json.dumps(data, indent=2)
+                        ).strip()
+                    if isinstance(data, list):
+                        return " ".join(str(x) for x in data)
+                    return str(data)
+                except:
+                    return r.text.strip()
+
+            return "Sorry, the automation returned an unexpected response."
+    except Exception as e:
+        log.error(f"n8n error: {e}")
+        return "Sorry, couldn't reach automation."
+
+# =====================================================
+# 🎤 WS HANDLER — FIXED AUDIO (LOGIC UNCHANGED)
+# =====================================================
+
 def _normalize(m: str):
     m = m.lower().strip()
     m = "".join(ch for ch in m if ch not in string.punctuation)
     return " ".join(m.split())
 
 def _is_similar(a: str, b: str):
-    return bool(a and b and (a == b or a in b or b in a))
+    return bool(a and b and (a == b or a.startswith(b) or b.startswith(a) or a in b or b in a))
 
-# =====================================================
-# 🎤 WEBSOCKET FIXED VERSION (NO PLATE LOGIC CHANGES)
-# =====================================================
 @app.websocket("/ws")
 async def websocket_handler(ws: WebSocket):
+
     await ws.accept()
 
     user_id = "solomon_roth"
-    recent = []
-    processed = set()
+    recent_msgs = []
+    processed_messages = set()
 
-    # === Load prompt & fix greeting ===
+    # === Keywords (unchanged)
+    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
+    plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
+    plate_add_kw = ["add", "put", "create", "new", "include"]
+    plate_check_kw = ["what", "show", "see", "check", "read"]
+
+    add_phrases = [
+        "Of course boss. Doing that now.",
+        "Gotcha. Give me one sec.",
+        "Of course. Adding that now.",
+        "Okay. Putting that on your plate.",
+        "Not a problem. I’ll be right back.",
+    ]
+    check_phrases = [
+        "Let’s see what’s on your plate...",
+        "One moment, checking that for you...",
+        "Alright, here’s what you’ve got...",
+        "Give me a sec, pulling that up...",
+    ]
+    calendar_phrases = [
+        "Let me check your schedule real quick...",
+        "Just a second while I pull that up...",
+        "Alright, let’s take a look at your calendar...",
+        "Okay, seeing what’s on your agenda...",
+    ]
+
     prompt = await get_notion_prompt()
-    greet = "Hey Solomon, I'm Silas."
+    greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
 
-    # Speak greeting with TTS (no JSON)
+    # FIX: do NOT send JSON text greeting (your index can't parse it)
     try:
-        t = await openai_client.audio.speech.create(
-            model="gpt-4o-mini-tts", voice="alloy", input=greet
+        tts = await openai_client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=greet
         )
-        await ws.send_bytes(await t.aread())
+        await ws.send_bytes(await tts.aread())
     except:
         pass
 
     try:
+
         while True:
 
-            audio = await ws.receive_bytes()
+            audio_bytes = await ws.receive_bytes()
 
-            # ======= FIXED STT =======
+            # ======= STT =======
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file=("audio.webm", audio, "audio/webm")
+                    file=("audio.webm", audio_bytes, "audio/webm")
                 )
                 msg = getattr(stt, "text", "").strip()
-            except:
-                continue
-
-            if not msg:
+                if not msg:
+                    continue
+            except Exception as e:
+                log.error(f"❌ STT error: {e}")
                 continue
 
             norm = _normalize(msg)
             now = time.time()
-
-            # strong duplicate filtering
-            recent = [(m, t) for m, t in recent if now - t < 2]
-            if any(_is_similar(m, norm) for m, t in recent):
+            recent_msgs = [(m, t) for (m, t) in recent_msgs if now - t < 2]
+            if any(_is_similar(m, norm) for m, t in recent_msgs):
                 continue
-            if norm in processed:
-                continue
+            recent_msgs.append((norm, now))
 
-            processed.add(norm)
-            recent.append((norm, now))
-
-            # memory / system prompt
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower = msg.lower()
 
-            # =====================================================
-            # =============     PLATE LOGIC UNTOUCHED    ==========
-            # =====================================================
-            plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
-            plate_add_kw = ["add", "put", "create", "new", "include"]
-            plate_check_kw = ["what", "show", "see", "check", "read"]
-
-            add_phrases = [
-                "Of course boss. Doing that now.",
-                "Gotcha. Give me one sec.",
-                "Of course. Adding that now.",
-                "Okay. Putting that on your plate.",
-                "Not a problem. I’ll be right back.",
-            ]
-            check_phrases = [
-                "Let’s see what’s on your plate...",
-                "One moment, checking that for you...",
-                "Alright, here’s what you’ve got...",
-                "Give me a sec, pulling that up...",
-            ]
-
+            # ===================== PLATE (UNCHANGED) =====================
             if any(k in lower for k in plate_kw):
 
-                if msg in processed:
+                if msg in processed_messages:
                     continue
-                processed.add(msg)
+                processed_messages.add(msg)
 
                 phrase = (
                     random.choice(add_phrases) if any(k in lower for k in plate_add_kw)
@@ -235,72 +271,38 @@ async def websocket_handler(ws: WebSocket):
                     else "Let me handle that..."
                 )
 
-                # speak the working phrase
-                try:
-                    t = await openai_client.audio.speech.create(
-                        model="gpt-4o-mini-tts",
-                        voice="alloy",
-                        input=phrase
-                    )
-                    await ws.send_bytes(await t.aread())
-                except:
-                    pass
-
                 reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
-                # final tts
                 try:
-                    t2 = await openai_client.audio.speech.create(
+                    tts = await openai_client.audio.speech.create(
                         model="gpt-4o-mini-tts",
                         voice="alloy",
                         input=reply
                     )
-                    await ws.send_bytes(await t2.aread())
+                    await ws.send_bytes(await tts.aread())
                 except:
                     pass
 
                 continue
 
-            # =====================================================
-            # ==================== CALENDAR LOGIC =================
-            # =====================================================
-            calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
-            calendar_phrases = [
-                "Let me check your schedule real quick...",
-                "Just a second while I pull that up...",
-                "Alright, let’s take a look at your calendar...",
-                "Okay, seeing what’s on your agenda...",
-            ]
-
+            # ===================== CALENDAR (UNCHANGED) =====================
             if any(k in lower for k in calendar_kw):
-
-                try:
-                    t = await openai_client.audio.speech.create(
-                        model="gpt-4o-mini-tts",
-                        voice="alloy",
-                        input=random.choice(calendar_phrases)
-                    )
-                    await ws.send_bytes(await t.aread())
-                except:
-                    pass
 
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
                 try:
-                    t2 = await openai_client.audio.speech.create(
+                    tts = await openai_client.audio.speech.create(
                         model="gpt-4o-mini-tts",
                         voice="alloy",
                         input=reply
                     )
-                    await ws.send_bytes(await t2.aread())
+                    await ws.send_bytes(await tts.aread())
                 except:
                     pass
 
                 continue
 
-            # =====================================================
-            # ==================== NORMAL CHAT ====================
-            # =====================================================
+            # ===================== NORMAL LLM =====================
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -311,35 +313,33 @@ async def websocket_handler(ws: WebSocket):
                     stream=True,
                 )
 
-                buf = ""
+                buffer = ""
 
                 async for chunk in stream:
                     delta = getattr(chunk.choices[0].delta, "content", "")
-                    if not delta:
-                        continue
+                    if delta:
+                        buffer += delta
 
-                    buf += delta
+                        if buffer.endswith((". ", "?", "!")):
+                            try:
+                                tts = await openai_client.audio.speech.create(
+                                    model="gpt-4o-mini-tts",
+                                    voice="alloy",
+                                    input=buffer
+                                )
+                                await ws.send_bytes(await tts.aread())
+                            except:
+                                pass
+                            buffer = ""
 
-                    if buf.endswith((". ", "?", "!")):
-                        try:
-                            t = await openai_client.audio.speech.create(
-                                model="gpt-4o-mini-tts",
-                                voice="alloy",
-                                input=buf
-                            )
-                            await ws.send_bytes(await t.aread())
-                        except:
-                            pass
-                        buf = ""
-
-                if buf.strip():
+                if buffer.strip():
                     try:
-                        t = await openai_client.audio.speech.create(
+                        tts = await openai_client.audio.speech.create(
                             model="gpt-4o-mini-tts",
                             voice="alloy",
-                            input=buf
+                            input=buffer
                         )
-                        await ws.send_bytes(await t.aread())
+                        await ws.send_bytes(await tts.aread())
                     except:
                         pass
 

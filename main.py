@@ -170,8 +170,6 @@ async def send_to_n8n(url: str, message: str) -> str:
 # =====================================================
 # 🎤 WS HANDLER
 # =====================================================
-connections = {}
-
 def _normalize(msg: str):
     msg = msg.lower().strip()
     msg = "".join(ch for ch in msg if ch not in string.punctuation)
@@ -233,11 +231,10 @@ async def websocket_handler(ws: WebSocket):
             # =====================================================
             # 🎤 RECEIVE RAW BINARY AUDIO (WEBM)
             # =====================================================
-            data = await ws.receive_bytes()
-            audio_bytes = data  # this is webm/opus from browser
+            audio_bytes = await ws.receive_bytes()
 
             # =====================================================
-            # 🎤 CORRECT STT CALL
+            # 🎤 STT — ACCEPT WEBM/OPUS
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
@@ -292,8 +289,7 @@ async def websocket_handler(ws: WebSocket):
                     voice="alloy",
                     input=n8n_reply
                 )
-                audio_bytes = audio.read()
-                await ws.send_bytes(audio_bytes)
+                await ws.send_bytes(audio.read())
                 continue
 
             # =====================================================
@@ -309,8 +305,7 @@ async def websocket_handler(ws: WebSocket):
                     voice="alloy",
                     input=cal_reply
                 )
-                audio_bytes = audio.read()
-                await ws.send_bytes(audio_bytes)
+                await ws.send_bytes(audio.read())
                 continue
 
             # =====================================================
@@ -337,8 +332,7 @@ async def websocket_handler(ws: WebSocket):
                                 voice="alloy",
                                 input=buffer
                             )
-                            audio_bytes = audio.read()
-                            await ws.send_bytes(audio_bytes)
+                            await ws.send_bytes(audio.read())
                             buffer = ""
 
                 if buffer.strip():
@@ -347,8 +341,7 @@ async def websocket_handler(ws: WebSocket):
                         voice="alloy",
                         input=buffer
                     )
-                    audio_bytes = audio.read()
-                    await ws.send_bytes(audio_bytes)
+                    await ws.send_bytes(audio.read())
 
                 asyncio.create_task(mem0_add(user_id, msg))
 

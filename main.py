@@ -101,13 +101,12 @@ def memory_context(memories: list) -> str:
     return "Relevant memories:\n" + "\n".join(lines)
 
 # =====================================================
-# 🧩 NOTION PROMPT (FIXED URL ONLY)
+# 🧩 NOTION PROMPT
 # =====================================================
 async def get_notion_prompt():
     if not NOTION_PAGE_ID or not NOTION_API_KEY:
         return "You are Solomon Roth’s personal AI assistant, Silas."
 
-    # ❗ FIXED: removed stray "}" at end
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
 
     headers = {
@@ -130,7 +129,7 @@ async def get_notion_prompt():
         return "You are Solomon Roth’s AI assistant, Silas."
 
 # =====================================================
-# 🔹 /prompt ENDPOINT (unchanged)
+# 🔹 /prompt ENDPOINT
 # =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt_text():
@@ -138,7 +137,7 @@ async def get_prompt_text():
     return PlainTextResponse(txt, headers={"Access-Control-Allow-Origin": "*"})
 
 # =====================================================
-# 🧩 n8n HELPERS (unchanged)
+# 🧩 n8n HELPERS
 # =====================================================
 async def send_to_n8n(url: str, message: str) -> str:
     try:
@@ -169,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER (ONLY AUDIO RECEIVE FIXED)
+# 🎤 WS HANDLER — FIXED TO HEAR YOU
 # =====================================================
 
 def _normalize(m: str):
@@ -189,7 +188,7 @@ async def websocket_handler(ws: WebSocket):
     recent_msgs = []
     processed_messages = set()
 
-    # === Keywords (UNCHANGED)
+    # Keywords (unchanged)
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
@@ -218,7 +217,7 @@ async def websocket_handler(ws: WebSocket):
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
 
-    # SPEAK greeting (no JSON — compatible with your index)
+    # SPEAK greeting
     try:
         tts_greet = await openai_client.audio.speech.create(
             model="gpt-4o-mini-tts",
@@ -230,13 +229,17 @@ async def websocket_handler(ws: WebSocket):
         pass
 
     try:
-
         while True:
 
-            # ======= FIXED AUDIO RECEIVE =======
-            data = await ws.receive()
+            # ====== FIX: Safe receive with disconnect handling ======
+            try:
+                data = await ws.receive()
+            except RuntimeError:
+                break  # browser disconnected momentarily
+            except WebSocketDisconnect:
+                break
 
-            # Only process binary audio
+            # Only handle binary audio
             if data["type"] == "websocket.receive":
                 if "bytes" in data and data["bytes"] is not None:
                     audio_bytes = data["bytes"]
@@ -245,11 +248,11 @@ async def websocket_handler(ws: WebSocket):
             else:
                 continue
 
-            # ======= STT =======
+            # ====== STT — FIXED FOR WAV/PCM ======
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file=("audio.webm", audio_bytes, "audio/webm")
+                    file=("audio.wav", audio_bytes, "audio/wav")   # FIXED
                 )
                 msg = getattr(stt, "text", "").strip()
                 if not msg:
@@ -258,7 +261,7 @@ async def websocket_handler(ws: WebSocket):
                 log.error(f"❌ STT error: {e}")
                 continue
 
-            # duplicate filtering
+            # duplicate filtering (unchanged)
             norm = _normalize(msg)
             now = time.time()
             recent_msgs = [(m, t) for (m, t) in recent_msgs if now - t < 2]
@@ -266,13 +269,13 @@ async def websocket_handler(ws: WebSocket):
                 continue
             recent_msgs.append((norm, now))
 
-            # memory
+            # memory (unchanged)
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower = msg.lower()
 
-            # ===================== PLATE (UNCHANGED) =====================
+            # ===================== PLATE (unchanged) =====================
             if any(k in lower for k in plate_kw):
 
                 if msg in processed_messages:
@@ -299,7 +302,7 @@ async def websocket_handler(ws: WebSocket):
 
                 continue
 
-            # ===================== CALENDAR (UNCHANGED) =====================
+            # ===================== CALENDAR (unchanged) =====================
             if any(k in lower for k in calendar_kw):
 
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)

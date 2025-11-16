@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER — WEBM IN, WAV OUT (ONLY .content FIX)
+# 🎤 WS HANDLER — WEBM IN, WAV OUT
 # =====================================================
 def _normalize(msg: str):
     msg = msg.lower().strip()
@@ -227,12 +227,14 @@ async def websocket_handler(ws: WebSocket):
     try:
         while True:
 
+            # RECEIVE AUDIO (WEBM BYTES)
             audio_bytes = await ws.receive_bytes()
 
+            # STT — webm
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file=("audio.webm", audio_bytes, "audio/webm; codecs=opus")
+                    file=("audio.webm", audio_bytes, "audio/webm")
                 )
                 msg = stt.text.strip() if hasattr(stt, "text") else ""
                 if not msg:
@@ -255,9 +257,7 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower_msg = msg.lower()
 
-            # ============================================================
-            # PLATE LOGIC — ONLY .content FIX
-            # ============================================================
+            # ========== PLATE LOGIC ==========
             if any(k in lower_msg for k in plate_kw):
 
                 if msg in processed_messages:
@@ -279,13 +279,12 @@ async def websocket_handler(ws: WebSocket):
                     voice="alloy",
                     input=n8n_reply
                 )
-                audio_bytes_out = audio_response.content
+
+                audio_bytes_out = await audio_response.aread()
                 await ws.send_bytes(audio_bytes_out)
                 continue
 
-            # ============================================================
-            # CALENDAR LOGIC — ONLY .content FIX
-            # ============================================================
+            # ========== CALENDAR LOGIC ==========
             if any(k in lower_msg for k in calendar_kw):
 
                 phrase = random.choice(calendar_phrases)
@@ -297,13 +296,12 @@ async def websocket_handler(ws: WebSocket):
                     voice="alloy",
                     input=cal_reply
                 )
-                audio_bytes_out = audio_response.content
+
+                audio_bytes_out = await audio_response.aread()
                 await ws.send_bytes(audio_bytes_out)
                 continue
 
-            # ============================================================
-            # LLM STREAMING — ONLY .content FIX
-            # ============================================================
+            # ========== GENERAL LLM ==========
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -326,7 +324,7 @@ async def websocket_handler(ws: WebSocket):
                                 voice="alloy",
                                 input=buffer
                             )
-                            audio_bytes_out = audio_response.content
+                            audio_bytes_out = await audio_response.aread()
                             await ws.send_bytes(audio_bytes_out)
                             buffer = ""
 
@@ -336,7 +334,7 @@ async def websocket_handler(ws: WebSocket):
                         voice="alloy",
                         input=buffer
                     )
-                    audio_bytes_out = audio_response.content
+                    audio_bytes_out = await audio_response.aread()
                     await ws.send_bytes(audio_bytes_out)
 
                 asyncio.create_task(mem0_add(user_id, msg))

@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER (RAW PCM WAV)
+# 🎤 WS HANDLER — RAW PCM WAV, FIXED
 # =====================================================
 def _normalize(msg: str):
     msg = msg.lower().strip()
@@ -228,26 +228,19 @@ async def websocket_handler(ws: WebSocket):
     try:
         while True:
 
-            # =====================================================
-            # 🎤 RECEIVE RAW WAV BYTES FROM CLIENT
-            # =====================================================
+            # RECEIVE AUDIO
             audio_bytes = await ws.receive_bytes()
 
-            # =====================================================
-            # 🎤 TRANSCRIBE WAV WITH OPENAI
-            # =====================================================
+            # TRANSCRIBE
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
                     file=("audio.wav", audio_bytes, "audio/wav")
                 )
-
                 msg = stt.text.strip() if hasattr(stt, "text") else ""
-
                 if not msg:
                     await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))
                     continue
-
             except Exception as e:
                 log.error(f"❌ STT error: {e}")
                 await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))
@@ -265,9 +258,7 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower_msg = msg.lower()
 
-            # =====================================================
-            # 🧩 PLATE LOGIC
-            # =====================================================
+            # PLATE LOGIC
             if any(k in lower_msg for k in plate_kw):
 
                 if msg in processed_messages:
@@ -287,17 +278,15 @@ async def websocket_handler(ws: WebSocket):
                 audio_response = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
-                    format="wav",
                     input=n8n_reply
                 )
 
                 await ws.send_bytes(audio_response.data)
                 continue
 
-            # =====================================================
-            # 🧩 CALENDAR LOGIC
-            # =====================================================
+            # CALENDAR LOGIC
             if any(k in lower_msg for k in calendar_kw):
+
                 phrase = random.choice(calendar_phrases)
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 cal_reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
@@ -305,16 +294,13 @@ async def websocket_handler(ws: WebSocket):
                 audio_response = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
-                    format="wav",
                     input=cal_reply
                 )
 
                 await ws.send_bytes(audio_response.data)
                 continue
 
-            # =====================================================
-            # 🧠 GENERAL LLM RESPONSE (STREAMING)
-            # =====================================================
+            # GENERAL LLM STREAMING
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -326,6 +312,7 @@ async def websocket_handler(ws: WebSocket):
                 )
 
                 buffer = ""
+
                 async for chunk in stream:
                     delta = getattr(chunk.choices[0].delta, "content", None)
                     if delta:
@@ -334,7 +321,6 @@ async def websocket_handler(ws: WebSocket):
                             audio_response = await openai_client.audio.speech.create(
                                 model="gpt-4o-mini-tts",
                                 voice="alloy",
-                                format="wav",
                                 input=buffer
                             )
                             await ws.send_bytes(audio_response.data)
@@ -344,7 +330,6 @@ async def websocket_handler(ws: WebSocket):
                     audio_response = await openai_client.audio.speech.create(
                         model="gpt-4o-mini-tts",
                         voice="alloy",
-                        format="wav",
                         input=buffer
                     )
                     await ws.send_bytes(audio_response.data)
@@ -362,7 +347,7 @@ async def websocket_handler(ws: WebSocket):
         pass
 
 # =====================================================
-# 🚀 RUN (UNMODIFIED)
+# 🚀 RUN
 # =====================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

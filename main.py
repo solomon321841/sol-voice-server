@@ -62,7 +62,7 @@ async def health():
     return {"ok": True}
 
 # =====================================================
-# 🧠 MEM0 MEMORY
+# 🧠 MEM0 MEMORY (UNCHANGED)
 # =====================================================
 async def mem0_search(user_id: str, query: str):
     if not MEMO_API_KEY:
@@ -101,13 +101,15 @@ def memory_context(memories: list) -> str:
     return "Relevant memories:\n" + "\n".join(lines)
 
 # =====================================================
-# 🧩 NOTION PROMPT
+# 🧩 NOTION PROMPT (FIXED URL ONLY)
 # =====================================================
 async def get_notion_prompt():
     if not NOTION_PAGE_ID or not NOTION_API_KEY:
         return "You are Solomon Roth’s personal AI assistant, Silas."
-    # FIXED URL (removed the stray '}')
+
+    # ❗ FIXED: removed stray "}" at end
     url = f"https://api.notion.com/v1/blocks/{NOTION_PAGE_ID}/children"
+
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": "2022-06-28",
@@ -128,7 +130,7 @@ async def get_notion_prompt():
         return "You are Solomon Roth’s AI assistant, Silas."
 
 # =====================================================
-# 🔹 /prompt ENDPOINT
+# 🔹 /prompt ENDPOINT (unchanged)
 # =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt_text():
@@ -136,7 +138,7 @@ async def get_prompt_text():
     return PlainTextResponse(txt, headers={"Access-Control-Allow-Origin": "*"})
 
 # =====================================================
-# 🧩 n8n HELPERS
+# 🧩 n8n HELPERS (unchanged)
 # =====================================================
 async def send_to_n8n(url: str, message: str) -> str:
     try:
@@ -167,7 +169,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER — FIXED AUDIO (LOGIC UNCHANGED)
+# 🎤 WS HANDLER (ONLY AUDIO RECEIVE FIXED)
 # =====================================================
 
 def _normalize(m: str):
@@ -187,7 +189,7 @@ async def websocket_handler(ws: WebSocket):
     recent_msgs = []
     processed_messages = set()
 
-    # === Keywords (unchanged)
+    # === Keywords (UNCHANGED)
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
@@ -216,14 +218,14 @@ async def websocket_handler(ws: WebSocket):
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
 
-    # FIX: do NOT send JSON text greeting (your index can't parse it)
+    # SPEAK greeting (no JSON — compatible with your index)
     try:
-        tts = await openai_client.audio.speech.create(
+        tts_greet = await openai_client.audio.speech.create(
             model="gpt-4o-mini-tts",
             voice="alloy",
             input=greet
         )
-        await ws.send_bytes(await tts.aread())
+        await ws.send_bytes(await tts_greet.aread())
     except:
         pass
 
@@ -231,7 +233,17 @@ async def websocket_handler(ws: WebSocket):
 
         while True:
 
-            audio_bytes = await ws.receive_bytes()
+            # ======= FIXED AUDIO RECEIVE =======
+            data = await ws.receive()
+
+            # Only process binary audio
+            if data["type"] == "websocket.receive":
+                if "bytes" in data and data["bytes"] is not None:
+                    audio_bytes = data["bytes"]
+                else:
+                    continue
+            else:
+                continue
 
             # ======= STT =======
             try:
@@ -246,6 +258,7 @@ async def websocket_handler(ws: WebSocket):
                 log.error(f"❌ STT error: {e}")
                 continue
 
+            # duplicate filtering
             norm = _normalize(msg)
             now = time.time()
             recent_msgs = [(m, t) for (m, t) in recent_msgs if now - t < 2]
@@ -253,6 +266,7 @@ async def websocket_handler(ws: WebSocket):
                 continue
             recent_msgs.append((norm, now))
 
+            # memory
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"

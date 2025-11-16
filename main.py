@@ -232,7 +232,7 @@ async def websocket_handler(ws: WebSocket):
             data = await ws.receive_bytes()
 
             # =====================================================
-            # FIXED STT — NOW USING WAV INPUT
+            # 🎤 **FIXED STT — WAV FORMAT**
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(

@@ -229,17 +229,17 @@ async def websocket_handler(ws: WebSocket):
         while True:
 
             # =====================================================
-            # 🎤 RECEIVE RAW BINARY AUDIO (WEBM)
+            # 🎤 RECEIVE RAW BINARY AUDIO (WAV)
             # =====================================================
             audio_bytes = await ws.receive_bytes()
 
             # =====================================================
-            # 🎤 STT — ACCEPT WEBM/OPUS
+            # 🎤 STT — WAV FORMAT FOR OPENAI
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file=("audio.webm", audio_bytes, "audio/webm")
+                    file=("audio.wav", audio_bytes, "audio/wav")
                 )
 
                 msg = stt.text.strip() if hasattr(stt, "text") else ""
@@ -287,9 +287,10 @@ async def websocket_handler(ws: WebSocket):
                 audio = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
+                    format="wav",
                     input=n8n_reply
                 )
-                await ws.send_bytes(audio.read())
+                await ws.send_bytes(audio)
                 continue
 
             # =====================================================
@@ -303,9 +304,10 @@ async def websocket_handler(ws: WebSocket):
                 audio = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
+                    format="wav",
                     input=cal_reply
                 )
-                await ws.send_bytes(audio.read())
+                await ws.send_bytes(audio)
                 continue
 
             # =====================================================
@@ -330,18 +332,20 @@ async def websocket_handler(ws: WebSocket):
                             audio = await openai_client.audio.speech.create(
                                 model="gpt-4o-mini-tts",
                                 voice="alloy",
+                                format="wav",
                                 input=buffer
                             )
-                            await ws.send_bytes(audio.read())
+                            await ws.send_bytes(audio)
                             buffer = ""
 
                 if buffer.strip():
                     audio = await openai_client.audio.speech.create(
                         model="gpt-4o-mini-tts",
                         voice="alloy",
+                        format="wav",
                         input=buffer
                     )
-                    await ws.send_bytes(audio.read())
+                    await ws.send_bytes(audio)
 
                 asyncio.create_task(mem0_add(user_id, msg))
 

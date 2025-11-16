@@ -279,7 +279,7 @@ async def websocket_handler(ws: WebSocket):
                 n8n_reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
                 audio = await openai_client.audio.speech.create(
-                    model="gpt-4.1-tts",
+                    model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=n8n_reply
                 )
@@ -292,7 +292,7 @@ async def websocket_handler(ws: WebSocket):
                 cal_reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
                 audio = await openai_client.audio.speech.create(
-                    model="gpt-4.1-tts",
+                    model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=cal_reply
                 )
@@ -316,7 +316,7 @@ async def websocket_handler(ws: WebSocket):
                         buffer += delta
                         if buffer.endswith(". ") or buffer.endswith("!") or buffer.endswith("?"):
                             audio = await openai_client.audio.speech.create(
-                                model="gpt-4.1-tts",
+                                model="gpt-4o-mini-tts",
                                 voice="alloy",
                                 input=buffer
                             )
@@ -325,7 +325,7 @@ async def websocket_handler(ws: WebSocket):
 
                 if buffer.strip():
                     audio = await openai_client.audio.speech.create(
-                        model="gpt-4.1-tts",
+                        model="gpt-4o-mini-tts",
                         voice="alloy",
                         input=buffer
                     )

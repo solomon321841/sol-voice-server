@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER — WEBM IN, WAV OUT (AUDIO FIXED ONLY)
+# 🎤 WS HANDLER — WEBM IN, WAV OUT (ONLY .data FIXED)
 # =====================================================
 def _normalize(msg: str):
     msg = msg.lower().strip()
@@ -258,7 +258,7 @@ async def websocket_handler(ws: WebSocket):
             lower_msg = msg.lower()
 
             # ============================================================
-            # PLATE LOGIC (UNCHANGED)
+            # PLATE LOGIC (UNCHANGED, ONLY .data FIX)
             # ============================================================
             if any(k in lower_msg for k in plate_kw):
 
@@ -276,17 +276,17 @@ async def websocket_handler(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 n8n_reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
-                # TTS FIX — NO .read()
-                audio_bytes_out = await openai_client.audio.speech.create(
+                audio_response = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=n8n_reply
                 )
+                audio_bytes_out = audio_response.data
                 await ws.send_bytes(audio_bytes_out)
                 continue
 
             # ============================================================
-            # CALENDAR LOGIC (UNCHANGED)
+            # CALENDAR LOGIC (.data FIX ONLY)
             # ============================================================
             if any(k in lower_msg for k in calendar_kw):
 
@@ -294,16 +294,17 @@ async def websocket_handler(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 cal_reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
-                audio_bytes_out = await openai_client.audio.speech.create(
+                audio_response = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=cal_reply
                 )
+                audio_bytes_out = audio_response.data
                 await ws.send_bytes(audio_bytes_out)
                 continue
 
             # ============================================================
-            # LLM STREAMING (UNCHANGED, AUDIO FIX ONLY)
+            # LLM STREAMING (UNCHANGED EXCEPT .data FIX)
             # ============================================================
             try:
                 stream = await openai_client.chat.completions.create(
@@ -323,20 +324,22 @@ async def websocket_handler(ws: WebSocket):
                         buffer += delta
                         # speak sentence-by-sentence
                         if buffer.endswith(". ") or buffer.endswith("!") or buffer.endswith("?"):
-                            audio_bytes_out = await openai_client.audio.speech.create(
+                            audio_response = await openai_client.audio.speech.create(
                                 model="gpt-4o-mini-tts",
                                 voice="alloy",
                                 input=buffer
                             )
+                            audio_bytes_out = audio_response.data
                             await ws.send_bytes(audio_bytes_out)
                             buffer = ""
 
                 if buffer.strip():
-                    audio_bytes_out = await openai_client.audio.speech.create(
+                    audio_response = await openai_client.audio.speech.create(
                         model="gpt-4o-mini-tts",
                         voice="alloy",
                         input=buffer
                     )
+                    audio_bytes_out = audio_response.data
                     await ws.send_bytes(audio_bytes_out)
 
                 asyncio.create_task(mem0_add(user_id, msg))

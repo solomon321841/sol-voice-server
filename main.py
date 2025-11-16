@@ -36,10 +36,10 @@ N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
 N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
 # =====================================================
-# 🤖 MODEL
+# 🤖 MODEL (UPDATED)
 # =====================================================
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-GPT_MODEL = "gpt-4.5"
+GPT_MODEL = "gpt-4o"
 
 # =====================================================
 # ⚙️ FASTAPI APP
@@ -232,7 +232,7 @@ async def websocket_handler(ws: WebSocket):
             data = await ws.receive_bytes()
 
             # =====================================================
-            # 🎤 FIXED STT — WAV FORMAT + NEW OPENAI RESPONSE FORMAT
+            # 🎤 STT (WAV) — FIXED FOR NEW OPENAI FORMAT
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
@@ -240,7 +240,6 @@ async def websocket_handler(ws: WebSocket):
                     file=("audio.wav", data, "audio/wav")
                 )
 
-                # Correct extraction for new OpenAI object format
                 msg = stt.text.strip() if hasattr(stt, "text") else ""
 
                 if not msg:

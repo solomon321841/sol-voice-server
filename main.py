@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER — WEBM IN, WAV OUT
+# 🎤 FIXED WS HANDLER — NO .data BUG — NO DOUBLE AUDIO
 # =====================================================
 def _normalize(msg: str):
     msg = msg.lower().strip()
@@ -179,11 +179,7 @@ def _normalize(msg: str):
 def _is_similar(a: str, b: str):
     if not a or not b:
         return False
-    if a == b:
-        return True
-    if a.startswith(b) or b.startswith(a):
-        return True
-    if a in b or b in a:
+    if a == b or a.startswith(b) or b.startswith(a) or a in b or b in a:
         return True
     return False
 
@@ -226,11 +222,8 @@ async def websocket_handler(ws: WebSocket):
 
     try:
         while True:
-
-            # RECEIVE AUDIO (WEBM BYTES)
             audio_bytes = await ws.receive_bytes()
 
-            # STT — webm
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
@@ -257,7 +250,7 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower_msg = msg.lower()
 
-            # ========== PLATE LOGIC ==========
+            # ========== PLATE LOGIC (UNCHANGED) ==========
             if any(k in lower_msg for k in plate_kw):
 
                 if msg in processed_messages:
@@ -274,34 +267,32 @@ async def websocket_handler(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 n8n_reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
-                audio_response = await openai_client.audio.speech.create(
+                # FIXED — USE .aread()
+                tts = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=n8n_reply
                 )
-
-                audio_bytes_out = await audio_response.aread()
+                audio_bytes_out = await tts.aread()
                 await ws.send_bytes(audio_bytes_out)
                 continue
 
-            # ========== CALENDAR LOGIC ==========
+            # ========== CALENDAR LOGIC (UNCHANGED) ==========
             if any(k in lower_msg for k in calendar_kw):
-
                 phrase = random.choice(calendar_phrases)
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 cal_reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
-                audio_response = await openai_client.audio.speech.create(
+                tts = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=cal_reply
                 )
-
-                audio_bytes_out = await audio_response.aread()
+                audio_bytes_out = await tts.aread()
                 await ws.send_bytes(audio_bytes_out)
                 continue
 
-            # ========== GENERAL LLM ==========
+            # ========== LLM STREAMING (FIXED) ==========
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -315,26 +306,27 @@ async def websocket_handler(ws: WebSocket):
                 buffer = ""
 
                 async for chunk in stream:
-                    delta = getattr(chunk.choices[0].delta, "content", None)
+                    delta = getattr(chunk.choices[0].delta, "content", "")
                     if delta:
                         buffer += delta
+
                         if buffer.endswith(". ") or buffer.endswith("!") or buffer.endswith("?"):
-                            audio_response = await openai_client.audio.speech.create(
+                            tts = await openai_client.audio.speech.create(
                                 model="gpt-4o-mini-tts",
                                 voice="alloy",
                                 input=buffer
                             )
-                            audio_bytes_out = await audio_response.aread()
+                            audio_bytes_out = await tts.aread()
                             await ws.send_bytes(audio_bytes_out)
                             buffer = ""
 
                 if buffer.strip():
-                    audio_response = await openai_client.audio.speech.create(
+                    tts = await openai_client.audio.speech.create(
                         model="gpt-4o-mini-tts",
                         voice="alloy",
                         input=buffer
                     )
-                    audio_bytes_out = await audio_response.aread()
+                    audio_bytes_out = await tts.aread()
                     await ws.send_bytes(audio_bytes_out)
 
                 asyncio.create_task(mem0_add(user_id, msg))

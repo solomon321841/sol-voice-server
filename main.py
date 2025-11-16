@@ -14,21 +14,36 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from openai import AsyncOpenAI
 
+# =====================================================
+# 🔧 LOGGING
+# =====================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 log = logging.getLogger("main")
 
+# =====================================================
+# 🔑 ENV
+# =====================================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 MEMO_API_KEY = os.getenv("MEMO_API_KEY", "").strip()
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "").strip()
 NOTION_PAGE_ID = os.getenv("NOTION_PAGE_ID", "").strip()
 
+# =====================================================
+# 🌐 n8n ENDPOINTS
+# =====================================================
 N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
 N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
+# =====================================================
+# 🤖 MODEL
+# =====================================================
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-GPT_MODEL = "gpt-4.5"
+GPT_MODEL = "gpt-4.5"   # your chosen chat model label
 
+# =====================================================
+# ⚙️ FASTAPI APP
+# =====================================================
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -46,6 +61,9 @@ async def home():
 async def health():
     return {"ok": True}
 
+# =====================================================
+# 🧠 MEM0 MEMORY
+# =====================================================
 async def mem0_search(user_id: str, query: str):
     if not MEMO_API_KEY:
         return []
@@ -81,6 +99,9 @@ def memory_context(memories: list) -> str:
             lines.append(f"- {txt}")
     return "Relevant memories:\n" + "\n".join(lines)
 
+# =====================================================
+# 🧩 NOTION PROMPT
+# =====================================================
 async def get_notion_prompt():
     if not NOTION_PAGE_ID or not NOTION_API_KEY:
         return "You are Solomon Roth’s personal AI assistant, Silas."
@@ -105,11 +126,18 @@ async def get_notion_prompt():
         log.error(f"❌ Notion error: {e}")
         return "You are Solomon Roth’s AI assistant, Silas."
 
+# =====================================================
+# 🔹 /prompt ENDPOINT
+# =====================================================
 @app.get("/prompt", response_class=PlainTextResponse)
 async def get_prompt_text():
     text = await get_notion_prompt()
-    return PlainTextResponse(text, headers={"Access-Control-Allow-Origin": "*"})
+    headers = {"Access-Control-Allow-Origin": "*"}
+    return PlainTextResponse(text, headers=headers)
 
+# =====================================================
+# 🧩 n8n HELPERS
+# =====================================================
 async def send_to_n8n(url: str, message: str) -> str:
     try:
         async with httpx.AsyncClient(timeout=20) as c:
@@ -126,37 +154,51 @@ async def send_to_n8n(url: str, message: str) -> str:
                             or data.get("message")
                             or data.get("text")
                             or data.get("output")
+                            or json.dumps(data, indent=2)
                         ).strip()
                     if isinstance(data, list):
                         return " ".join(str(x) for x in data)
                     return str(data)
                 except:
                     return r.text.strip()
-            return "Sorry, unexpected automation response."
+            return "Sorry, the automation returned an unexpected response."
+
     except Exception as e:
         log.error(f"n8n error: {e}")
         return "Sorry, couldn't reach automation."
 
+# =====================================================
+# 🎤 WS HANDLER (NO RETELL, WITH WEBM BUFFERING)
+# =====================================================
 connections = {}
 
 def _normalize(msg: str):
     msg = msg.lower().strip()
     msg = "".join(ch for ch in msg if ch not in string.punctuation)
-    return " ".join(msg.split())
+    msg = " ".join(msg.split())
+    return msg
 
 def _is_similar(a: str, b: str):
     if not a or not b:
         return False
-    return a == b or a.startswith(b) or b.startswith(a) or a in b or b in a
+    if a == b:
+        return True
+    if a.startswith(b) or b.startswith(a):
+        return True
+    if a in b or b in a:
+        return True
+    return False
 
 @app.websocket("/ws")
 async def websocket_handler(ws: WebSocket):
+
     await ws.accept()
     user_id = "solomon_roth"
 
     recent_msgs = []
     processed_messages = set()
 
+    # Keywords
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
@@ -182,119 +224,149 @@ async def websocket_handler(ws: WebSocket):
         "Okay, seeing what’s on your agenda...",
     ]
 
+    # Greeting
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await ws.send_text(json.dumps({"type": "text", "content": greet}))
 
+    # Buffer for one utterance (voice-mode style)
+    buffer = bytearray()
+
     try:
         while True:
-
-            data = await ws.receive_bytes()
-
-            # FIXED: Accept WEBM instead of WAV
             try:
-                stt = await openai_client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
-                    file=("audio.webm", data, "audio/webm")
-                )
-                msg = stt.get("text", "").strip()
-                if not msg:
+                # wait up to 1.0s for the next audio chunk
+                data = await asyncio.wait_for(ws.receive_bytes(), timeout=1.0)
+                # accumulate chunks into one utterance
+                buffer.extend(data)
+                continue
+
+            except asyncio.TimeoutError:
+                # no new audio for 1s
+                if not buffer:
+                    # nothing recorded yet, keep listening
                     continue
-            except Exception as e:
-                log.error(f"❌ STT error: {e}")
-                await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))
-                continue
 
-            norm = _normalize(msg)
-            now = time.time()
-            recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 2]
-            if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
-                continue
-            recent_msgs.append((norm, now))
+                # we have a full utterance worth of audio
+                audio_bytes = bytes(buffer)
+                buffer.clear()
 
-            mems = await mem0_search(user_id, msg)
-            ctx = memory_context(mems)
-            sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
-            lower_msg = msg.lower()
-
-            if any(k in lower_msg for k in plate_kw):
-
-                if msg in processed_messages:
+                # =====================================================
+                # STT — WEBM BUFFER → TEXT
+                # =====================================================
+                try:
+                    stt = await openai_client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=("audio.webm", audio_bytes, "audio/webm")
+                    )
+                    msg = stt.get("text", "").strip()
+                    log.info(f"🎙️ STT text: {msg}")
+                    if not msg:
+                        continue
+                except Exception as e:
+                    log.error(f"❌ STT error: {e}")
+                    await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))
                     continue
-                processed_messages.add(msg)
 
-                if any(k in lower_msg for k in plate_add_kw):
-                    phrase = random.choice(add_phrases)
-                elif any(k in lower_msg for k in plate_check_kw):
-                    phrase = random.choice(check_phrases)
-                else:
-                    phrase = "Let me handle that..."
+                # Debounce
+                norm = _normalize(msg)
+                now = time.time()
+                recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 2]
+                if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
+                    continue
+                recent_msgs.append((norm, now))
 
-                await ws.send_text(json.dumps({"type": "text", "content": phrase}))
-                reply = await send_to_n8n(N8N_PLATE_URL, msg)
+                # Memory + prompt context
+                mems = await mem0_search(user_id, msg)
+                ctx = memory_context(mems)
+                sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
+                lower_msg = msg.lower()
 
-                audio = await openai_client.audio.speech.create(
-                    model="gpt-4.1-tts",
-                    voice="alloy",
-                    input=reply
-                )
-                await ws.send_bytes(audio)
-                continue
+                # =====================================================
+                # PLATE TASKS
+                # =====================================================
+                if any(k in lower_msg for k in plate_kw):
 
-            if any(k in lower_msg for k in calendar_kw):
-                phrase = random.choice(calendar_phrases)
-                await ws.send_text(json.dumps({"type": "text", "content": phrase}))
-                reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
+                    if msg in processed_messages:
+                        continue
+                    processed_messages.add(msg)
 
-                audio = await openai_client.audio.speech.create(
-                    model="gpt-4.1-tts",
-                    voice="alloy",
-                    input=reply
-                )
-                await ws.send_bytes(audio)
-                continue
+                    if any(k in lower_msg for k in plate_add_kw):
+                        phrase = random.choice(add_phrases)
+                    elif any(k in lower_msg for k in plate_check_kw):
+                        phrase = random.choice(check_phrases)
+                    else:
+                        phrase = "Let me handle that..."
 
-            try:
-                stream = await openai_client.chat.completions.create(
-                    model=GPT_MODEL,
-                    messages=[
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user", "content": msg},
-                    ],
-                    stream=True,
-                )
+                    await ws.send_text(json.dumps({"type": "text", "content": phrase}))
 
-                buffer = ""
-                async for chunk in stream:
-                    delta = getattr(chunk.choices[0].delta, "content", None)
-                    if delta:
-                        buffer += delta
-                        if buffer.endswith((". ", "!", "?")):
-                            audio = await openai_client.audio.speech.create(
-                                model="gpt-4.1-tts",
-                                voice="alloy",
-                                input=buffer
-                            )
-                            await ws.send_bytes(audio)
-                            buffer = ""
+                    reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
-                if buffer.strip():
+                    # TTS RESPONSE
                     audio = await openai_client.audio.speech.create(
                         model="gpt-4.1-tts",
                         voice="alloy",
-                        input=buffer
+                        input=reply
                     )
                     await ws.send_bytes(audio)
+                    continue
 
-                asyncio.create_task(mem0_add(user_id, msg))
+                # =====================================================
+                # CALENDAR
+                # =====================================================
+                if any(k in lower_msg for k in calendar_kw):
+                    phrase = random.choice(calendar_phrases)
+                    await ws.send_text(json.dumps({"type": "text", "content": phrase}))
 
-            except Exception as e:
-                log.error(f"LLM error: {e}")
-                await ws.send_text(json.dumps({"type": "text", "content": "Sorry, I hit an issue."}))
+                    reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
+
+                    audio = await openai_client.audio.speech.create(
+                        model="gpt-4.1-tts",
+                        voice="alloy",
+                        input=reply
+                    )
+                    await ws.send_bytes(audio)
+                    continue
+
+                # =====================================================
+                # DEFAULT CHAT
+                # =====================================================
+                try:
+                    stream = await openai_client.chat.completions.create(
+                        model=GPT_MODEL,
+                        messages=[
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": msg},
+                        ],
+                        stream=True,
+                    )
+
+                    buffer_text = ""
+                    async for chunk in stream:
+                        delta = getattr(chunk.choices[0].delta, "content", None)
+                        if delta:
+                            buffer_text += delta
+
+                    if buffer_text.strip():
+                        audio = await openai_client.audio.speech.create(
+                            model="gpt-4.1-tts",
+                            voice="alloy",
+                            input=buffer_text
+                        )
+                        await ws.send_bytes(audio)
+
+                    asyncio.create_task(mem0_add(user_id, msg))
+
+                except Exception as e:
+                    log.error(f"LLM error: {e}")
+                    await ws.send_text(json.dumps({"type": "text", "content": "Sorry, I hit an issue."}))
 
     except WebSocketDisconnect:
         pass
 
+# =====================================================
+# 🚀 RUN SERVER
+# =====================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)

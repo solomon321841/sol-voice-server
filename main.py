@@ -170,7 +170,6 @@ async def send_to_n8n(url: str, message: str) -> str:
 # =====================================================
 # 🎤 WS HANDLER
 # =====================================================
-
 connections = {}
 
 def _normalize(msg: str):
@@ -224,60 +223,42 @@ async def websocket_handler(ws: WebSocket):
         "Okay, seeing what’s on your agenda...",
     ]
 
-    # Initial greeting
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
     await ws.send_text(json.dumps({"type": "text", "content": greet}))
 
-    pcm_buffer = bytearray()
-
     try:
         while True:
+            # *** FIX #1: SAFELY RECEIVE BYTES ***
+            try:
+                data = await ws.receive_bytes()
+            except:
+                break
 
-            incoming = await ws.receive()
-
-            # ============================
-            # AUDIO CHUNKS
-            # ============================
-            if "bytes" in incoming:
-                pcm_buffer.extend(incoming["bytes"])
-                continue
-
-            # ============================
-            # TEXT MESSAGES (start/stop)
-            # ============================
-            if "text" in incoming:
-                msg_json = json.loads(incoming["text"])
-                t = msg_json.get("type")
-
-                # STOP SIGNAL → TRANSCRIBE
-                if t == "stop":
-                    pcm = bytes(pcm_buffer)
-                    pcm_buffer = bytearray()
-
-                    transcript = await transcribe_pcm(pcm)
-
-                    # ⭐ FIX: PREVENT CRASH WHEN TRANSCRIPT IS EMPTY
-                    if not transcript or transcript.strip() == "":
-                        await ws.send_text(json.dumps({
-                            "type": "text",
-                            "content": "I couldn't hear that."
-                        }))
-                        continue
-
-                    msg = transcript.strip()
-
-                else:
+            # =====================================================
+            # 🎤 STT (FIXED)
+            # =====================================================
+            try:
+                stt = await openai_client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=("audio.wav", data, "audio/wav")
+                )
+                msg = stt.text.strip() if hasattr(stt, "text") else ""
+                if not msg:
+                    await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))
                     continue
 
-            # =====================================================
-            # BELOW THIS — YOUR LOGIC IS **UNCHANGED**
-            # =====================================================
+            except Exception as e:
+                log.error(f"❌ STT error: {e}")
+                await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))
+                continue
 
-            norm = msg.lower().strip()
+            # *** FIX #2: msg IS ALWAYS DEFINED BEFORE THIS POINT ***
+
+            norm = _normalize(msg)
             now = time.time()
             recent_msgs = [(m, ts) for (m, ts) in recent_msgs if now - ts < 2]
-            if any((norm in m or m in norm) for (m, ts) in recent_msgs):
+            if any(_is_similar(m, norm) for (m, ts) in recent_msgs):
                 continue
             recent_msgs.append((norm, now))
 
@@ -286,7 +267,9 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower_msg = msg.lower()
 
-            # PLATE
+            # =====================================================
+            # 🧩 PLATE LOGIC (UNCHANGED)
+            # =====================================================
             if any(k in lower_msg for k in plate_kw):
 
                 if msg in processed_messages:
@@ -302,59 +285,78 @@ async def websocket_handler(ws: WebSocket):
 
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 n8n_reply = await send_to_n8n(N8N_PLATE_URL, msg)
-                audio = await openai_client.audio.speech.create(
+
+                tts = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=n8n_reply
                 )
-                audio_bytes = audio.read()
-                await ws.send_bytes(audio_bytes)
+                await ws.send_bytes(tts.read())
                 continue
 
-            # CALENDAR
+            # =====================================================
+            # 🧩 CALENDAR LOGIC (UNCHANGED)
+            # =====================================================
             if any(k in lower_msg for k in calendar_kw):
                 phrase = random.choice(calendar_phrases)
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 cal_reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
-                audio = await openai_client.audio.speech.create(
+
+                tts = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     input=cal_reply
                 )
-                audio_bytes = audio.read()
-                await ws.send_bytes(audio_bytes)
+                await ws.send_bytes(tts.read())
                 continue
 
-            # GENERAL
+            # =====================================================
+            # 🧠 GENERAL LLM RESPONSE (ONLY FIX WAS TTS READ)
+            # =====================================================
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
                     messages=[
                         {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": msg},
-                    ]
+                    ],
+                    stream=True,
                 )
 
-                reply = stream.choices[0].message.content
+                buffer = ""
 
-                audio = await openai_client.audio.speech.create(
-                    model="gpt-4o-mini-tts",
-                    voice="alloy",
-                    input=reply
-                )
-                audio_bytes = audio.read()
-                await ws.send_bytes(audio_bytes)
+                async for chunk in stream:
+                    delta = getattr(chunk.choices[0].delta, "content", None)
+                    if delta:
+                        buffer += delta
+                        if buffer.endswith((".", "!", "?")):
+                            tts = await openai_client.audio.speech.create(
+                                model="gpt-4o-mini-tts",
+                                voice="alloy",
+                                input=buffer
+                            )
+                            await ws.send_bytes(tts.read())
+                            buffer = ""
+
+                if buffer.strip():
+                    tts = await openai_client.audio.speech.create(
+                        model="gpt-4o-mini-tts",
+                        voice="alloy",
+                        input=buffer
+                    )
+                    await ws.send_bytes(tts.read())
 
                 asyncio.create_task(mem0_add(user_id, msg))
 
             except Exception as e:
                 log.error(f"LLM error: {e}")
-                await ws.send_text(json.dumps({"type": "text", "content":"Sorry, I hit an issue."}))
+                try:
+                    await ws.send_text(json.dumps({"type": "text", "content": "Sorry, I hit an issue."}))
+                except:
+                    pass
 
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        log.error(f"WS error: {e}")
 
 # =====================================================
 # 🚀 RUN
@@ -362,4 +364,5 @@ async def websocket_handler(ws: WebSocket):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 

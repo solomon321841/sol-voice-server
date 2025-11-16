@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER (NO RETELL)
+# 🎤 WS HANDLER
 # =====================================================
 connections = {}
 
@@ -232,16 +232,20 @@ async def websocket_handler(ws: WebSocket):
             data = await ws.receive_bytes()
 
             # =====================================================
-            # 🎤 **FIXED STT — WAV FORMAT**
+            # 🎤 FIXED STT — WAV FORMAT + NEW OPENAI RESPONSE FORMAT
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
                     file=("audio.wav", data, "audio/wav")
                 )
-                msg = stt.get("text", "").strip()
+
+                # Correct extraction for new OpenAI object format
+                msg = stt.text.strip() if hasattr(stt, "text") else ""
+
                 if not msg:
                     continue
+
             except Exception as e:
                 log.error(f"❌ STT error: {e}")
                 await ws.send_text(json.dumps({"type": "text", "content": "I couldn't hear that."}))

@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER — FIXED TO HEAR YOU
+# 🎤 WS HANDLER — ONLY ONE LINE CHANGED (webm)
 # =====================================================
 
 def _normalize(m: str):
@@ -231,15 +231,14 @@ async def websocket_handler(ws: WebSocket):
     try:
         while True:
 
-            # ====== FIX: Safe receive with disconnect handling ======
+            # ====== Safe receive ======
             try:
                 data = await ws.receive()
             except RuntimeError:
-                break  # browser disconnected momentarily
+                break
             except WebSocketDisconnect:
                 break
 
-            # Only handle binary audio
             if data["type"] == "websocket.receive":
                 if "bytes" in data and data["bytes"] is not None:
                     audio_bytes = data["bytes"]
@@ -248,11 +247,13 @@ async def websocket_handler(ws: WebSocket):
             else:
                 continue
 
-            # ====== STT — FIXED FOR WAV/PCM ======
+            # =====================================================
+            # ⭐ STT FIX — decode MediaRecorder audio correctly
+            # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file=("audio.wav", audio_bytes, "audio/wav")   # FIXED
+                    file=("audio.webm", audio_bytes, "audio/webm")
                 )
                 msg = getattr(stt, "text", "").strip()
                 if not msg:
@@ -261,7 +262,8 @@ async def websocket_handler(ws: WebSocket):
                 log.error(f"❌ STT error: {e}")
                 continue
 
-            # duplicate filtering (unchanged)
+            # duplicate filter and everything else untouched…
+
             norm = _normalize(msg)
             now = time.time()
             recent_msgs = [(m, t) for (m, t) in recent_msgs if now - t < 2]
@@ -269,13 +271,12 @@ async def websocket_handler(ws: WebSocket):
                 continue
             recent_msgs.append((norm, now))
 
-            # memory (unchanged)
             mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower = msg.lower()
 
-            # ===================== PLATE (unchanged) =====================
+            # ============== PLATE LOGIC (UNCHANGED) ==============
             if any(k in lower for k in plate_kw):
 
                 if msg in processed_messages:
@@ -302,7 +303,7 @@ async def websocket_handler(ws: WebSocket):
 
                 continue
 
-            # ===================== CALENDAR (unchanged) =====================
+            # ============== CALENDAR LOGIC (UNCHANGED) ==============
             if any(k in lower for k in calendar_kw):
 
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
@@ -319,7 +320,7 @@ async def websocket_handler(ws: WebSocket):
 
                 continue
 
-            # ===================== NORMAL LLM =====================
+            # ============== NORMAL CHAT (UNCHANGED) ==============
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,

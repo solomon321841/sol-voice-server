@@ -36,7 +36,7 @@ N8N_CALENDAR_URL = "https://n8n.marshall321.org/webhook/calendar-agent"
 N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 
 # =====================================================
-# 🤖 MODEL (UPDATED)
+# 🤖 MODEL
 # =====================================================
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 GPT_MODEL = "gpt-4o"
@@ -232,7 +232,7 @@ async def websocket_handler(ws: WebSocket):
             data = await ws.receive_bytes()
 
             # =====================================================
-            # 🎤 STT (WAV) — FIXED FOR NEW OPENAI FORMAT
+            # 🎤 STT (WAV) — WORKING
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
@@ -262,6 +262,9 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower_msg = msg.lower()
 
+            # =====================================================
+            # 🧩 PLATE LOGIC
+            # =====================================================
             if any(k in lower_msg for k in plate_kw):
 
                 if msg in processed_messages:
@@ -283,9 +286,13 @@ async def websocket_handler(ws: WebSocket):
                     voice="alloy",
                     input=n8n_reply
                 )
-                await ws.send_bytes(audio)
+                audio_bytes = audio.read()
+                await ws.send_bytes(audio_bytes)
                 continue
 
+            # =====================================================
+            # 🧩 CALENDAR LOGIC
+            # =====================================================
             if any(k in lower_msg for k in calendar_kw):
                 phrase = random.choice(calendar_phrases)
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
@@ -296,9 +303,13 @@ async def websocket_handler(ws: WebSocket):
                     voice="alloy",
                     input=cal_reply
                 )
-                await ws.send_bytes(audio)
+                audio_bytes = audio.read()
+                await ws.send_bytes(audio_bytes)
                 continue
 
+            # =====================================================
+            # 🧠 GENERAL LLM RESPONSE
+            # =====================================================
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -320,7 +331,8 @@ async def websocket_handler(ws: WebSocket):
                                 voice="alloy",
                                 input=buffer
                             )
-                            await ws.send_bytes(audio)
+                            audio_bytes = audio.read()
+                            await ws.send_bytes(audio_bytes)
                             buffer = ""
 
                 if buffer.strip():
@@ -329,13 +341,17 @@ async def websocket_handler(ws: WebSocket):
                         voice="alloy",
                         input=buffer
                     )
-                    await ws.send_bytes(audio)
+                    audio_bytes = audio.read()
+                    await ws.send_bytes(audio_bytes)
 
                 asyncio.create_task(mem0_add(user_id, msg))
 
             except Exception as e:
                 log.error(f"LLM error: {e}")
-                await ws.send_text(json.dumps({"type": "text", "content": "Sorry, I hit an issue."}))
+                try:
+                    await ws.send_text(json.dumps({"type": "text", "content": "Sorry, I hit an issue."}))
+                except:
+                    pass
 
     except WebSocketDisconnect:
         pass

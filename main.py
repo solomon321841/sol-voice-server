@@ -232,7 +232,7 @@ async def websocket_handler(ws: WebSocket):
             data = await ws.receive_bytes()
 
             # =====================================================
-            # 🎤 STT (WAV) — WORKING
+            # 🎤 STT (WAV)
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
@@ -308,7 +308,7 @@ async def websocket_handler(ws: WebSocket):
                 continue
 
             # =====================================================
-            # 🧠 GENERAL LLM RESPONSE
+            # 🧠 GENERAL LLM RESPONSE (STREAMING)
             # =====================================================
             try:
                 stream = await openai_client.chat.completions.create(

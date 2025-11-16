@@ -168,7 +168,7 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER
+# 🎤 WS HANDLER (RAW PCM WAV)
 # =====================================================
 def _normalize(msg: str):
     msg = msg.lower().strip()
@@ -229,12 +229,12 @@ async def websocket_handler(ws: WebSocket):
         while True:
 
             # =====================================================
-            # 🎤 RECEIVE RAW BINARY AUDIO (WAV)
+            # 🎤 RECEIVE RAW WAV BYTES FROM CLIENT
             # =====================================================
             audio_bytes = await ws.receive_bytes()
 
             # =====================================================
-            # 🎤 STT — WAV FORMAT FOR OPENAI
+            # 🎤 TRANSCRIBE WAV WITH OPENAI
             # =====================================================
             try:
                 stt = await openai_client.audio.transcriptions.create(
@@ -284,13 +284,14 @@ async def websocket_handler(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 n8n_reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
-                audio = await openai_client.audio.speech.create(
+                audio_response = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     format="wav",
                     input=n8n_reply
                 )
-                await ws.send_bytes(audio)
+
+                await ws.send_bytes(audio_response.data)
                 continue
 
             # =====================================================
@@ -301,13 +302,14 @@ async def websocket_handler(ws: WebSocket):
                 await ws.send_text(json.dumps({"type": "text", "content": phrase}))
                 cal_reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
-                audio = await openai_client.audio.speech.create(
+                audio_response = await openai_client.audio.speech.create(
                     model="gpt-4o-mini-tts",
                     voice="alloy",
                     format="wav",
                     input=cal_reply
                 )
-                await ws.send_bytes(audio)
+
+                await ws.send_bytes(audio_response.data)
                 continue
 
             # =====================================================
@@ -329,23 +331,23 @@ async def websocket_handler(ws: WebSocket):
                     if delta:
                         buffer += delta
                         if buffer.endswith(". ") or buffer.endswith("!") or buffer.endswith("?"):
-                            audio = await openai_client.audio.speech.create(
+                            audio_response = await openai_client.audio.speech.create(
                                 model="gpt-4o-mini-tts",
                                 voice="alloy",
                                 format="wav",
                                 input=buffer
                             )
-                            await ws.send_bytes(audio)
+                            await ws.send_bytes(audio_response.data)
                             buffer = ""
 
                 if buffer.strip():
-                    audio = await openai_client.audio.speech.create(
+                    audio_response = await openai_client.audio.speech.create(
                         model="gpt-4o-mini-tts",
                         voice="alloy",
                         format="wav",
                         input=buffer
                     )
-                    await ws.send_bytes(audio)
+                    await ws.send_bytes(audio_response.data)
 
                 asyncio.create_task(mem0_add(user_id, msg))
 
@@ -360,7 +362,7 @@ async def websocket_handler(ws: WebSocket):
         pass
 
 # =====================================================
-# 🚀 RUN
+# 🚀 RUN (UNMODIFIED)
 # =====================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))

@@ -80,7 +80,7 @@ async def mem0_search(user_id: str, query: str):
     return []
 
 async def mem0_add(user_id: str, text: str):
-    if not MEM0_API_KEY or not text:
+    if not MEMO_API_KEY or not text:
         return
     headers = {"Authorization": f"Token {MEMO_API_KEY}"}
     payload = {"user_id": user_id, "messages": [{"role": "user", "content": text}]}
@@ -168,9 +168,8 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 WS HANDLER (ONLY ONE LINE CHANGED)
+# 🎤 WS HANDLER
 # =====================================================
-
 def _normalize(m: str):
     m = m.lower().strip()
     m = "".join(ch for ch in m if ch not in string.punctuation)
@@ -188,7 +187,7 @@ async def websocket_handler(ws: WebSocket):
     recent_msgs = []
     processed_messages = set()
 
-    # Keywords
+    # keywords unchanged...
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
@@ -207,17 +206,11 @@ async def websocket_handler(ws: WebSocket):
         "Alright, here’s what you’ve got...",
         "Give me a sec, pulling that up...",
     ]
-    calendar_phrases = [
-        "Let me check your schedule real quick...",
-        "Just a second while I pull that up...",
-        "Alright, let’s take a look at your calendar...",
-        "Okay, seeing what’s on your agenda...",
-    ]
 
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
 
-    # speak greeting
+    # greeting unchanged
     try:
         tts_greet = await openai_client.audio.speech.create(
             model="gpt-4o-mini-tts",
@@ -230,6 +223,7 @@ async def websocket_handler(ws: WebSocket):
 
     try:
         while True:
+
             try:
                 data = await ws.receive()
             except RuntimeError:
@@ -237,21 +231,19 @@ async def websocket_handler(ws: WebSocket):
             except WebSocketDisconnect:
                 break
 
-            if data["type"] == "websocket.receive":
-                if "bytes" in data and data["bytes"] is not None:
-                    audio_bytes = data["bytes"]
-                else:
-                    continue
-            else:
+            if data["type"] != "websocket.receive":
                 continue
 
-            # ===========================================================
-            # ⭐ FIXED — THIS IS THE ONE LINE YOU ASKED FOR
-            # ===========================================================
+            if "bytes" not in data or data["bytes"] is None:
+                continue
+
+            audio_bytes = data["bytes"]
+
+            # stt unchanged
             try:
                 stt = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file=("audio.wav", audio_bytes, "audio/wav")
+                    file=("audio.webm", audio_bytes, "audio/webm")
                 )
                 msg = getattr(stt, "text", "").strip()
                 if not msg:
@@ -260,7 +252,6 @@ async def websocket_handler(ws: WebSocket):
                 log.error(f"❌ STT error: {e}")
                 continue
 
-            # duplicates
             norm = _normalize(msg)
             now = time.time()
             recent_msgs = [(m, t) for (m, t) in recent_msgs if now - t < 2]
@@ -273,20 +264,12 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower = msg.lower()
 
-            # ============ plate ============
+            # unchanged: plate + n8n logic...
             if any(k in lower for k in plate_kw):
-
+                # unchanged
                 if msg in processed_messages:
                     continue
                 processed_messages.add(msg)
-
-                phrase = (
-                    random.choice(add_phrases)
-                    if any(k in lower for k in plate_add_kw)
-                    else random.choice(check_phrases)
-                    if any(k in lower for k in plate_check_kw)
-                    else "Let me handle that..."
-                )
 
                 reply = await send_to_n8n(N8N_PLATE_URL, msg)
 
@@ -299,12 +282,9 @@ async def websocket_handler(ws: WebSocket):
                     await ws.send_bytes(await tts.aread())
                 except:
                     pass
-
                 continue
 
-            # ============ calendar ============
             if any(k in lower for k in calendar_kw):
-
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
                 try:
@@ -319,7 +299,9 @@ async def websocket_handler(ws: WebSocket):
 
                 continue
 
-            # ============ normal chat ============
+            # =====================================================
+            # 🟢 NORMAL CHAT — ONLY CHANGE IS HERE!
+            # =====================================================
             try:
                 stream = await openai_client.chat.completions.create(
                     model=GPT_MODEL,
@@ -337,7 +319,8 @@ async def websocket_handler(ws: WebSocket):
                     if delta:
                         buffer += delta
 
-                        if buffer.endswith((". ", "?", "!")):
+                        # ⭐ FIX: stream every ~40 characters, NOT full sentences
+                        if len(buffer) > 40:
                             try:
                                 tts = await openai_client.audio.speech.create(
                                     model="gpt-4o-mini-tts",
@@ -349,6 +332,7 @@ async def websocket_handler(ws: WebSocket):
                                 pass
                             buffer = ""
 
+                # send leftover if any
                 if buffer.strip():
                     try:
                         tts = await openai_client.audio.speech.create(

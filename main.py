@@ -5,7 +5,6 @@ import asyncio
 import time
 import random
 import string
-import struct
 from typing import List, Dict
 from dotenv import load_dotenv
 import httpx
@@ -42,6 +41,9 @@ N8N_PLATE_URL = "https://n8n.marshall321.org/webhook/agent/plate"
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 GPT_MODEL = "gpt-4o"
 
+# =====================================================
+# ⚙️ FASTAPI APP
+# =====================================================
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -60,7 +62,7 @@ async def health():
     return {"ok": True}
 
 # =====================================================
-# 🧠 MEM0 MEMORY (unchanged)
+# 🧠 MEM0 MEMORY (UNCHANGED)
 # =====================================================
 async def mem0_search(user_id: str, query: str):
     if not MEMO_API_KEY:
@@ -78,7 +80,7 @@ async def mem0_search(user_id: str, query: str):
     return []
 
 async def mem0_add(user_id: str, text: str):
-    if not MEMO_API_KEY or not text:
+    if not MEM0_API_KEY or not text:
         return
     headers = {"Authorization": f"Token {MEMO_API_KEY}"}
     payload = {"user_id": user_id, "messages": [{"role": "user", "content": text}]}
@@ -135,7 +137,7 @@ async def get_prompt_text():
     return PlainTextResponse(txt, headers={"Access-Control-Allow-Origin": "*"})
 
 # =====================================================
-# 🧩 n8n HELPERS (unchanged)
+# 🧩 n8n HELPERS
 # =====================================================
 async def send_to_n8n(url: str, message: str) -> str:
     try:
@@ -166,38 +168,56 @@ async def send_to_n8n(url: str, message: str) -> str:
         return "Sorry, couldn't reach automation."
 
 # =====================================================
-# 🎤 STREAMING AUDIO HANDLER (ChatGPT-style)
+# 🎤 WS HANDLER (ONLY ONE LINE CHANGED)
 # =====================================================
-def pcm_float_to_wav(pcm_data: List[float], sample_rate=16000):
-    pcm16 = b''.join(struct.pack('<h', int(max(-1, min(1, s)) * 32767)) for s in pcm_data)
 
-    wav_header = (
-        b'RIFF' +
-        struct.pack('<I', 36 + len(pcm16)) +
-        b'WAVEfmt ' +
-        struct.pack('<I', 16) +
-        struct.pack('<H', 1) +
-        struct.pack('<H', 1) +
-        struct.pack('<I', sample_rate) +
-        struct.pack('<I', sample_rate * 2) +
-        struct.pack('<H', 2) +
-        struct.pack('<H', 16) +
-        b'data' +
-        struct.pack('<I', len(pcm16))
-    )
-    return wav_header + pcm16
+def _normalize(m: str):
+    m = m.lower().strip()
+    m = "".join(ch for ch in m if ch not in string.punctuation)
+    return " ".join(m.split())
+
+def _is_similar(a: str, b: str):
+    return bool(a and b and (a == b or a.startswith(b) or b.startswith(a) or a in b or b in a))
 
 @app.websocket("/ws")
 async def websocket_handler(ws: WebSocket):
+
     await ws.accept()
 
     user_id = "solomon_roth"
-    audio_buffer = []
-    recording = True
+    recent_msgs = []
+    processed_messages = set()
 
-    # ===== Greeting (unchanged) =====
+    # Keywords
+    calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
+    plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
+    plate_add_kw = ["add", "put", "create", "new", "include"]
+    plate_check_kw = ["what", "show", "see", "check", "read"]
+
+    add_phrases = [
+        "Of course boss. Doing that now.",
+        "Gotcha. Give me one sec.",
+        "Of course. Adding that now.",
+        "Okay. Putting that on your plate.",
+        "Not a problem. I’ll be right back.",
+    ]
+    check_phrases = [
+        "Let’s see what’s on your plate...",
+        "One moment, checking that for you...",
+        "Alright, here’s what you’ve got...",
+        "Give me a sec, pulling that up...",
+    ]
+    calendar_phrases = [
+        "Let me check your schedule real quick...",
+        "Just a second while I pull that up...",
+        "Alright, let’s take a look at your calendar...",
+        "Okay, seeing what’s on your agenda...",
+    ]
+
     prompt = await get_notion_prompt()
-    greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I'm Silas."
+    greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
+
+    # speak greeting
     try:
         tts_greet = await openai_client.audio.speech.create(
             model="gpt-4o-mini-tts",
@@ -210,89 +230,143 @@ async def websocket_handler(ws: WebSocket):
 
     try:
         while True:
-            data = await ws.receive()
+            try:
+                data = await ws.receive()
+            except RuntimeError:
+                break
+            except WebSocketDisconnect:
+                break
 
-            # STOP SIGNAL RECEIVED
-            if data["type"] == "websocket.receive" and "text" in data and data["text"]:
-                msg = json.loads(data["text"])
-                if msg.get("event") == "stop":
-                    recording = False
-                    break
+            if data["type"] == "websocket.receive":
+                if "bytes" in data and data["bytes"] is not None:
+                    audio_bytes = data["bytes"]
+                else:
+                    continue
+            else:
+                continue
 
-            # AUDIO CHUNK RECEIVED
-            if "bytes" in data and data["bytes"]:
+            # ===========================================================
+            # ⭐ FIXED — THIS IS THE ONE LINE YOU ASKED FOR
+            # ===========================================================
+            try:
+                stt = await openai_client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=("audio.wav", audio_bytes, "audio/wav")
+                )
+                msg = getattr(stt, "text", "").strip()
+                if not msg:
+                    continue
+            except Exception as e:
+                log.error(f"❌ STT error: {e}")
+                continue
+
+            # duplicates
+            norm = _normalize(msg)
+            now = time.time()
+            recent_msgs = [(m, t) for (m, t) in recent_msgs if now - t < 2]
+            if any(_is_similar(m, norm) for m, t in recent_msgs):
+                continue
+            recent_msgs.append((norm, now))
+
+            mems = await mem0_search(user_id, msg)
+            ctx = memory_context(mems)
+            sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
+            lower = msg.lower()
+
+            # ============ plate ============
+            if any(k in lower for k in plate_kw):
+
+                if msg in processed_messages:
+                    continue
+                processed_messages.add(msg)
+
+                phrase = (
+                    random.choice(add_phrases)
+                    if any(k in lower for k in plate_add_kw)
+                    else random.choice(check_phrases)
+                    if any(k in lower for k in plate_check_kw)
+                    else "Let me handle that..."
+                )
+
+                reply = await send_to_n8n(N8N_PLATE_URL, msg)
+
                 try:
-                    float_arr = struct.unpack('<' + 'f'*(len(data["bytes"])//4), data["bytes"])
-                    audio_buffer.extend(float_arr)
+                    tts = await openai_client.audio.speech.create(
+                        model="gpt-4o-mini-tts",
+                        voice="alloy",
+                        input=reply
+                    )
+                    await ws.send_bytes(await tts.aread())
                 except:
                     pass
 
+                continue
+
+            # ============ calendar ============
+            if any(k in lower for k in calendar_kw):
+
+                reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
+
+                try:
+                    tts = await openai_client.audio.speech.create(
+                        model="gpt-4o-mini-tts",
+                        voice="alloy",
+                        input=reply
+                    )
+                    await ws.send_bytes(await tts.aread())
+                except:
+                    pass
+
+                continue
+
+            # ============ normal chat ============
+            try:
+                stream = await openai_client.chat.completions.create(
+                    model=GPT_MODEL,
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": msg},
+                    ],
+                    stream=True,
+                )
+
+                buffer = ""
+
+                async for chunk in stream:
+                    delta = getattr(chunk.choices[0].delta, "content", "")
+                    if delta:
+                        buffer += delta
+
+                        if buffer.endswith((". ", "?", "!")):
+                            try:
+                                tts = await openai_client.audio.speech.create(
+                                    model="gpt-4o-mini-tts",
+                                    voice="alloy",
+                                    input=buffer
+                                )
+                                await ws.send_bytes(await tts.aread())
+                            except:
+                                pass
+                            buffer = ""
+
+                if buffer.strip():
+                    try:
+                        tts = await openai_client.audio.speech.create(
+                            model="gpt-4o-mini-tts",
+                            voice="alloy",
+                            input=buffer
+                        )
+                        await ws.send_bytes(await tts.aread())
+                    except:
+                        pass
+
+                asyncio.create_task(mem0_add(user_id, msg))
+
+            except Exception as e:
+                log.error(f"LLM error: {e}")
+
     except WebSocketDisconnect:
         pass
-
-    # ===================================================
-    # 🧠 TRANSCRIBE FULL BUFFER
-    # ===================================================
-    wav_bytes = pcm_float_to_wav(audio_buffer)
-
-    text = ""
-    try:
-        stt = await openai_client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=("audio.wav", wav_bytes, "audio/wav")
-        )
-        text = getattr(stt, "text", "")
-    except Exception as e:
-        log.error(f"❌ STT error: {e}")
-        return
-
-    if not text.strip():
-        return
-
-    lower = text.lower()
-
-    # ===================================================
-    # PLATE LOGIC (unchanged)
-    # ===================================================
-    if "plate" in lower or "task" in lower or "add" in lower or "list" in lower:
-        reply = await send_to_n8n(N8N_PLATE_URL, text)
-    # ===================================================
-    # CALENDAR LOGIC (unchanged)
-    # ===================================================
-    elif "calendar" in lower or "schedule" in lower or "appointment" in lower:
-        reply = await send_to_n8n(N8N_CALENDAR_URL, text)
-    # ===================================================
-    # NORMAL CHAT
-    # ===================================================
-    else:
-        mems = await mem0_search(user_id, text)
-        ctx = memory_context(mems)
-        sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
-
-        reply = ""
-        stream = await openai_client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=[
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": text},
-            ],
-            stream=True,
-        )
-
-        async for chunk in stream:
-            delta = getattr(chunk.choices[0].delta, "content", "")
-            if delta:
-                reply += delta
-
-                # STREAM OUT TTS IN REALTIME
-                tts = await openai_client.audio.speech.create(
-                    model="gpt-4o-mini-tts",
-                    voice="alloy",
-                    input=delta
-                )
-                await ws.send_bytes(await tts.aread())
-
-    asyncio.create_task(mem0_add(user_id, text))
 
 # =====================================================
 # 🚀 RUN

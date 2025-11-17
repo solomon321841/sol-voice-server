@@ -13,7 +13,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from openai import AsyncOpenAI
-import tempfile   # ⭐ ADDED
+import tempfile  # for STT temp file wrapping
 
 # =====================================================
 # 🔧 LOGGING
@@ -188,6 +188,7 @@ async def websocket_handler(ws: WebSocket):
     recent_msgs = []
     processed_messages = set()
 
+    # keywords unchanged...
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
@@ -210,9 +211,7 @@ async def websocket_handler(ws: WebSocket):
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
 
-    # -------------------------------------------
-    # GREETING UNCHANGED
-    # -------------------------------------------
+    # greeting unchanged
     try:
         tts_greet = await openai_client.audio.speech.create(
             model="gpt-4o-mini-tts",
@@ -242,18 +241,24 @@ async def websocket_handler(ws: WebSocket):
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ NEW FIX: WRAP IN TEMP .WEBM FILE FOR STT
+            # ⭐ STT FIX: WRAP RAW BYTES INTO TEMP .WEBM FILE
             # =====================================================
             try:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
                     tmp.write(audio_bytes)
                     tmp.flush()
+                    tmp_path = tmp.name
 
-                    with open(tmp.name, "rb") as f:
-                        stt = await openai_client.audio.transcriptions.create(
-                            model="gpt-4o-mini-transcribe",
-                            file=f
-                        )
+                with open(tmp_path, "rb") as f:
+                    stt = await openai_client.audio.transcriptions.create(
+                        model="gpt-4o-mini-transcribe",
+                        file=f
+                    )
+
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
                 msg = getattr(stt, "text", "").strip()
                 if not msg:
@@ -273,7 +278,7 @@ async def websocket_handler(ws: WebSocket):
                 continue
             recent_msgs.append((norm, now))
 
-            mems = await.mem0_search(user_id, msg)
+            mems = await mem0_search(user_id, msg)
             ctx = memory_context(mems)
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower = msg.lower()
@@ -314,7 +319,7 @@ async def websocket_handler(ws: WebSocket):
                 continue
 
             # =====================================================
-            # 🟢 NORMAL CHAT (UNCHANGED STREAM LOGIC)
+            # 🟢 NORMAL CHAT — SAME STREAMING LOGIC
             # =====================================================
             try:
                 stream = await openai_client.chat.completions.create(
@@ -333,6 +338,7 @@ async def websocket_handler(ws: WebSocket):
                     if delta:
                         buffer += delta
 
+                        # stream every ~40 characters
                         if len(buffer) > 40:
                             try:
                                 tts = await openai_client.audio.speech.create(
@@ -345,9 +351,10 @@ async def websocket_handler(ws: WebSocket):
                                 pass
                             buffer = ""
 
+                # send leftover if any
                 if buffer.strip():
                     try:
-                        tts = await.openai_client.audio.speech.create(
+                        tts = await openai_client.audio.speech.create(
                             model="gpt-4o-mini-tts",
                             voice="alloy",
                             input=buffer

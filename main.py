@@ -239,12 +239,12 @@ async def websocket_handler(ws: WebSocket):
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ FIXED STT — CORRECT OPENAI FORMAT
+            # ⭐ FIXED STT — ONLY ONE CORRECT FORMAT
             # =====================================================
             try:
                 stt_resp = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file={"file": audio_bytes, "filename": "audio.webm", "mime_type": "audio/webm"}
+                    file=("audio.webm", audio_bytes)
                 )
                 msg = stt_resp.text.strip()
                 if not msg:

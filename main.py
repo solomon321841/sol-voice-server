@@ -13,7 +13,6 @@ from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from openai import AsyncOpenAI
-import tempfile  # for STT temp file wrapping
 
 # =====================================================
 # 🔧 LOGGING
@@ -188,7 +187,6 @@ async def websocket_handler(ws: WebSocket):
     recent_msgs = []
     processed_messages = set()
 
-    # keywords unchanged...
     calendar_kw = ["calendar", "meeting", "schedule", "appointment"]
     plate_kw = ["plate", "add", "to-do", "task", "notion", "list"]
     plate_add_kw = ["add", "put", "create", "new", "include"]
@@ -241,26 +239,14 @@ async def websocket_handler(ws: WebSocket):
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ STT FIX: WRAP RAW BYTES INTO TEMP .WEBM FILE
+            # ⭐ FIXED STT — SIMPLE DIRECT MULTIPART, NO TEMP FILES
             # =====================================================
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
-                    tmp.write(audio_bytes)
-                    tmp.flush()
-                    tmp_path = tmp.name
-
-                with open(tmp_path, "rb") as f:
-                    stt = await openai_client.audio.transcriptions.create(
-                        model="gpt-4o-mini-transcribe",
-                        file=f
-                    )
-
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-
-                msg = getattr(stt, "text", "").strip()
+                stt_resp = await openai_client.audio.transcriptions.create(
+                    model="gpt-4o-mini-transcribe",
+                    file=("audio.webm", audio_bytes, "audio/webm")
+                )
+                msg = stt_resp.text.strip()
                 if not msg:
                     continue
 
@@ -338,7 +324,6 @@ async def websocket_handler(ws: WebSocket):
                     if delta:
                         buffer += delta
 
-                        # stream every ~40 characters
                         if len(buffer) > 40:
                             try:
                                 tts = await openai_client.audio.speech.create(

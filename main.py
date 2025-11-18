@@ -280,7 +280,7 @@ async def websocket_handler(ws: WebSocket):
             norm = _normalize(msg)
             now = time.time()
             recent_msgs = [(m, t) for (m, t) in recent_msgs if now - t < 2]
-            if any(_is_similar(m, norm) for m, t in recent_msgs):
+            if any(_is_similar(m, norm) for (m, t) in recent_msgs):
                 continue
             recent_msgs.append((norm, now))
 
@@ -356,7 +356,7 @@ async def websocket_handler(ws: WebSocket):
 
                 if buffer.strip():
                     try:
-                        tts = await openai_client.audio.sspeech.create(
+                        tts = await openai_client.audio.speech.create(   # <— FIXED LINE
                             model="gpt-4o-mini-tts",
                             voice="alloy",
                             input=buffer

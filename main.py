@@ -13,7 +13,6 @@ from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from openai import AsyncOpenAI
-import tempfile  # ⭐ ONLY FIX – NOTHING ELSE CHANGED
 
 # =====================================================
 # 🔧 LOGGING
@@ -210,6 +209,7 @@ async def websocket_handler(ws: WebSocket):
     prompt = await get_notion_prompt()
     greet = prompt.splitlines()[0] if prompt else "Hello Solomon, I’m Silas."
 
+    # greeting unchanged
     try:
         tts_greet = await openai_client.audio.speech.create(
             model="gpt-4o-mini-tts",
@@ -239,12 +239,12 @@ async def websocket_handler(ws: WebSocket):
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ FIXED STT — SIMPLE DIRECT MULTIPART, NO LOGIC REMOVED
+            # ⭐ FIXED STT — CORRECT OPENAI FORMAT
             # =====================================================
             try:
                 stt_resp = await openai_client.audio.transcriptions.create(
                     model="gpt-4o-mini-transcribe",
-                    file=("audio.webm", audio_bytes, "audio/webm")
+                    file={"file": audio_bytes, "filename": "audio.webm", "mime_type": "audio/webm"}
                 )
                 msg = stt_resp.text.strip()
                 if not msg:

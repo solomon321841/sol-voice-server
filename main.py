@@ -242,18 +242,20 @@ async def websocket_handler(ws: WebSocket):
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ STT USING WHISPER-1 + CORRECT MIME FIX
+            # ⭐ STT USING WHISPER-1 — FIXED FOR WEBM OPUS INPUT
             # =====================================================
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                # Save bytes as .webm (the real format your index sends)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
                     tmp.write(audio_bytes)
                     tmp.flush()
                     tmp_path = tmp.name
 
+                # Feed Whisper the correct MIME type
                 with open(tmp_path, "rb") as f:
                     stt = await openai_client.audio.transcriptions.create(
                         model="whisper-1",
-                        file=("audio.wav", f, "audio/wav"),  # ✅ FIXED MIME
+                        file=("audio.webm", f, "audio/webm"),
                         response_format="text"
                     )
 
@@ -354,7 +356,7 @@ async def websocket_handler(ws: WebSocket):
 
                 if buffer.strip():
                     try:
-                        tts = await openai_client.audio.speech.create(
+                        tts = await openai_client.audio.sspeech.create(
                             model="gpt-4o-mini-tts",
                             voice="alloy",
                             input=buffer

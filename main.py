@@ -47,11 +47,12 @@ GPT_MODEL = "gpt-4o"
 # =====================================================
 app = FastAPI()
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    CORSMiddleware(
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 )
 
 @app.get("/")
@@ -113,7 +114,7 @@ async def get_notion_prompt():
     headers = {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -151,11 +152,11 @@ async def send_to_n8n(url: str, message: str) -> str:
                     data = r.json()
                     if isinstance(data, dict):
                         return (
-                            data.get("reply") or
-                            data.get("message") or
-                            data.get("text") or
-                            data.get("output") or
-                            json.dumps(data, indent=2)
+                            data.get("reply")
+                            or data.get("message")
+                            or data.get("text")
+                            or data.get("output")
+                            or json.dumps(data, indent=2)
                         ).strip()
                     if isinstance(data, list):
                         return " ".join(str(x) for x in data)
@@ -234,14 +235,13 @@ async def websocket_handler(ws: WebSocket):
 
             if data["type"] != "websocket.receive":
                 continue
-
             if "bytes" not in data or data["bytes"] is None:
                 continue
 
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ STT FIX: WRAP RAW BYTES INTO TEMP .WEBM FILE
+            # ⭐ FIXED STT USING WHISPER-1
             # =====================================================
             try:
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
@@ -251,16 +251,17 @@ async def websocket_handler(ws: WebSocket):
 
                 with open(tmp_path, "rb") as f:
                     stt = await openai_client.audio.transcriptions.create(
-                        model="gpt-4o-mini-transcribe",
-                        file=f
+                        model="whisper-1",
+                        file=f,
+                        response_format="text"
                     )
 
                 try:
                     os.remove(tmp_path)
-                except OSError:
+                except:
                     pass
 
-                msg = getattr(stt, "text", "").strip()
+                msg = stt.strip()
                 if not msg:
                     continue
 
@@ -283,7 +284,6 @@ async def websocket_handler(ws: WebSocket):
             sys_prompt = f"{prompt}\n\nFacts:\n{ctx}"
             lower = msg.lower()
 
-            # ---- Plate Logic (UNCHANGED) ----
             if any(k in lower for k in plate_kw):
                 if msg in processed_messages:
                     continue
@@ -302,7 +302,6 @@ async def websocket_handler(ws: WebSocket):
                     pass
                 continue
 
-            # ---- Calendar Logic (UNCHANGED) ----
             if any(k in lower for k in calendar_kw):
                 reply = await send_to_n8n(N8N_CALENDAR_URL, msg)
 
@@ -319,7 +318,7 @@ async def websocket_handler(ws: WebSocket):
                 continue
 
             # =====================================================
-            # 🟢 NORMAL CHAT — SAME STREAMING LOGIC
+            # NORMAL CHAT (UNCHANGED)
             # =====================================================
             try:
                 stream = await openai_client.chat.completions.create(
@@ -338,7 +337,6 @@ async def websocket_handler(ws: WebSocket):
                     if delta:
                         buffer += delta
 
-                        # stream every ~40 characters
                         if len(buffer) > 40:
                             try:
                                 tts = await openai_client.audio.speech.create(
@@ -351,7 +349,6 @@ async def websocket_handler(ws: WebSocket):
                                 pass
                             buffer = ""
 
-                # send leftover if any
                 if buffer.strip():
                     try:
                         tts = await openai_client.audio.speech.create(

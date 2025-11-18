@@ -47,7 +47,7 @@ GPT_MODEL = "gpt-4o"
 # =====================================================
 app = FastAPI()
 
-# ✅ FIXED CORS SYNTAX (YOUR ONLY ERROR)
+# CORS (correct syntax)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -242,10 +242,11 @@ async def websocket_handler(ws: WebSocket):
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ FIXED STT USING WHISPER-1
+            # ⭐ STT USING WHISPER-1 + HARD FILTER
             # =====================================================
             try:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+                # use .wav since frontend is sending WAV now
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                     tmp.write(audio_bytes)
                     tmp.flush()
                     tmp_path = tmp.name
@@ -263,7 +264,14 @@ async def websocket_handler(ws: WebSocket):
                     pass
 
                 msg = stt.strip()
-                if not msg:
+
+                # 🔒 HARD FILTER: ignore junk / noise / tiny garbage
+                if (
+                    not msg
+                    or len(msg) < 3
+                    or msg in [".", ",", "?", "!", "uh", "um"]
+                    or not any(ch.isalpha() for ch in msg)
+                ):
                     continue
 
             except Exception as e:

@@ -242,10 +242,9 @@ async def websocket_handler(ws: WebSocket):
             audio_bytes = data["bytes"]
 
             # =====================================================
-            # ⭐ STT USING WHISPER-1 + HARD FILTER
+            # ⭐ STT USING WHISPER-1 + CORRECT MIME FIX
             # =====================================================
             try:
-                # use .wav since frontend is sending WAV now
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                     tmp.write(audio_bytes)
                     tmp.flush()
@@ -254,18 +253,13 @@ async def websocket_handler(ws: WebSocket):
                 with open(tmp_path, "rb") as f:
                     stt = await openai_client.audio.transcriptions.create(
                         model="whisper-1",
-                        file=f,
+                        file=("audio.wav", f, "audio/wav"),  # ✅ FIXED MIME
                         response_format="text"
                     )
 
-                try:
-                    os.remove(tmp_path)
-                except:
-                    pass
-
                 msg = stt.strip()
 
-                # 🔒 HARD FILTER: ignore junk / noise / tiny garbage
+                # HARD FILTER (unchanged)
                 if (
                     not msg
                     or len(msg) < 3
